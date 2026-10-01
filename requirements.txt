@@ -1,0 +1,27 @@
+# SudoSleep — wearable respiratory signal prototype
+# YŪGŌ Hackathon 2026 | project work period: Jan–Jun 2026
+
+# Core ML
+torch>=2.4.0,<3.0
+numpy>=1.26.0,<3.0
+pandas>=2.1.0,<3.0
+scikit-learn>=1.4.0,<2.0
+shap>=0.46.0,<1.0
+
+# Signal Processing
+scipy>=1.12.0,<2.0
+PyWavelets>=1.5.0
+
+# PhysioNet WFDB Data Reading
+wfdb>=4.1.0
+
+# Visualization
+matplotlib>=3.8.0
+plotly>=5.18.0
+seaborn>=0.13.2
+
+# Web Dashboard
+streamlit>=1.54.0
+
+# Feature caching utilities
+joblib>=1.3.2

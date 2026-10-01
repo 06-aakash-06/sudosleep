@@ -1,0 +1,17 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.streamlit/secrets.toml
+
+# Local environments and downloaded PhysioNet records
+venv/
+.venv/
+data/
+
+# Generated model weights, feature caches, and result exports
+*.pt
+*.pth
+*.pkl
+features_cache*/
+outputs/
