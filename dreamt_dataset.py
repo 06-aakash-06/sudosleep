@@ -15,6 +15,21 @@ def _normalise(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
 
+def recording_start(path: Path) -> float:
+    """Return the first published timestamp; some PSG files start well after zero."""
+    header = pd.read_csv(path, nrows=0)
+    names = {_normalise(str(col)): str(col) for col in header.columns}
+    if "timestamp" not in names:
+        raise ValueError("DREAMT CSV must contain TIMESTAMP.")
+    first = pd.read_csv(path, usecols=[names["timestamp"]], nrows=1)
+    if first.empty:
+        raise ValueError("DREAMT CSV is empty.")
+    value = float(pd.to_numeric(first.iloc[0, 0], errors="raise"))
+    if not np.isfinite(value) or value < 0:
+        raise ValueError("DREAMT CSV has an invalid first timestamp.")
+    return value
+
+
 def load_dreamt_segment(path: Path, start_seconds: float, duration_seconds: float,
                         chunksize: int = 100_000) -> pd.DataFrame:
     """Load acceleration and optional sleep-stage labels from one local DREAMT file.
@@ -33,6 +48,11 @@ def load_dreamt_segment(path: Path, start_seconds: float, duration_seconds: floa
     rename = {names[key]: value for key, value in required.items()}
     if "sleepstage" in names:
         rename[names["sleepstage"]] = "psg_sleep_stage"
+    for key, output in {"obstructiveapnea": "psg_obstructive_apnea", "centralapnea": "psg_central_apnea",
+                        "hypopnea": "psg_hypopnea", "multipleevents": "psg_multiple_events",
+                        "mixedapnea": "psg_mixed_apnea"}.items():
+        if key in names:
+            rename[names[key]] = output
     pieces = []
     last_timestamp = -np.inf
     end_seconds = start_seconds + duration_seconds

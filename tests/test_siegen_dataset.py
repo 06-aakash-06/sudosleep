@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from siegen_dataset import archive_records, load_segment, recording_info
-from dreamt_dataset import load_dreamt_segment
+from dreamt_dataset import load_dreamt_segment, recording_start
 from wearable_pipeline import _find_axis_columns, infer_sample_rate, heuristic_scores, heuristic_shap_attributions, preprocess_accelerometer
 
 
@@ -100,6 +100,7 @@ class SiegenDatasetTest(unittest.TestCase):
         pd.DataFrame({"TIMESTAMP": times, "ACC_X": np.sin(times), "ACC_Y": np.cos(times),
                       "ACC_Z": 1, "Sleep_Stage": "N2", "ECG": 9}).to_csv(path, index=False)
         frame = load_dreamt_segment(path, 10, 30, chunksize=500)
+        self.assertEqual(recording_start(path), 0.0)
         self.assertEqual(len(frame), 3000)
         self.assertEqual(frame.psg_sleep_stage.iloc[0], "N2")
         self.assertNotIn("label", frame.columns)

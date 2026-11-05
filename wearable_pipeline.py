@@ -643,8 +643,22 @@ def candidate_event_rate(states: np.ndarray, records: np.ndarray,
     return event_runs, duration_hours, float(rate)
 
 
+def _checkpoint_scalars(scalars: np.ndarray, checkpoint: dict) -> np.ndarray:
+    """Apply the checkpoint's training-only scalar normalization when present."""
+    values = np.nan_to_num(np.asarray(scalars, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    center = checkpoint.get("scalar_center")
+    scale = checkpoint.get("scalar_scale")
+    if center is None and scale is None:
+        return values
+    center, scale = np.asarray(center, dtype=np.float32), np.asarray(scale, dtype=np.float32)
+    if (center.shape != (N_SCALAR_FEATS,) or scale.shape != (N_SCALAR_FEATS,)
+            or not np.all(np.isfinite(center)) or not np.all(np.isfinite(scale)) or np.any(scale <= 0)):
+        raise ValueError("Checkpoint scalar normalization is invalid.")
+    return np.clip((values - center) / scale, -10, 10).astype(np.float32)
+
+
 def predict_with_accelerometer_checkpoint(
-    precomputed: dict[str, Any], checkpoint_path: str | Path
+    precomputed: dict[str, Any], checkpoint_path: str | Path, indices: np.ndarray | None = None
 ) -> tuple[np.ndarray, np.ndarray]:
     """Run only a checkpoint explicitly tagged as accelerometer-trained."""
     import torch
@@ -668,8 +682,8 @@ def predict_with_accelerometer_checkpoint(
     transition = np.asarray(checkpoint.get("transition_matrix", default_transition_matrix()))
     labels = np.zeros(len(precomputed["labels"]), dtype=np.float32)
     dataset = model_pipeline.TemporalContextDataset(
-        precomputed["signals_3ch"], precomputed["scalars"], labels,
-        precomputed["records"],
+        precomputed["signals_3ch"], _checkpoint_scalars(precomputed["scalars"], checkpoint), labels,
+        precomputed["records"], indices=indices,
     )
     loader = torch.utils.data.DataLoader(dataset, batch_size=128, shuffle=False, num_workers=0)
     ensemble_probs = []
@@ -684,6 +698,65 @@ def predict_with_accelerometer_checkpoint(
                 probs.extend(torch.sigmoid(logits).cpu().numpy().tolist())
         ensemble_probs.append(np.asarray(probs, dtype=np.float32))
     return np.mean(ensemble_probs, axis=0), transition
+
+
+def explain_accelerometer_model_scalars(
+    precomputed: dict[str, Any], checkpoint_path: str | Path, index: int
+) -> tuple[list[str], np.ndarray, float, float]:
+    """Kernel SHAP for the center minute's scalar inputs, with signals fixed.
+
+    This conditional explanation does not attribute the waveform or the other
+    context minutes. The background is the median training scalar vector saved
+    inside the local checkpoint.
+    """
+    import shap
+    import torch
+    import pipeline as model_pipeline
+
+    device = model_pipeline.get_device()
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    if checkpoint.get("input_modality") != "accelerometer" or \
+       checkpoint.get("preprocessing_version") != precomputed.get("preprocessing_version") or \
+       checkpoint.get("feature_names") != FEATURE_NAMES:
+        raise ValueError("Checkpoint is incompatible with the input preprocessing.")
+    background = np.asarray(checkpoint.get("scalar_background", []), dtype=np.float64)
+    if background.shape != (len(FEATURE_NAMES),):
+        raise ValueError("Checkpoint has no training-scalar SHAP background.")
+    labels = np.zeros(len(precomputed["signals_3ch"]), dtype=np.float32)
+    dataset = model_pipeline.TemporalContextDataset(precomputed["signals_3ch"], _checkpoint_scalars(precomputed["scalars"], checkpoint),
+                                                     labels, precomputed["records"], indices=np.array([index]))
+    signal, scalar, _ = dataset[0]
+    center = scalar.shape[0] // 2
+    models = []
+    for state in checkpoint.get("model_states", []):
+        model = model_pipeline.SudoSleepNet().to(device)
+        model.load_state_dict(state)
+        model.eval()
+        models.append(model)
+    if not models:
+        raise ValueError("Checkpoint contains no model weights.")
+
+    def score_fn(values):
+        values = np.asarray(values, dtype=np.float32)
+        results = []
+        with torch.no_grad():
+            for start in range(0, len(values), 2):
+                part = values[start:start + 2]
+                signals = signal.unsqueeze(0).repeat(len(part), 1, 1, 1).to(device)
+                scalars = scalar.unsqueeze(0).repeat(len(part), 1, 1).to(device)
+                scalars[:, center, :] = torch.from_numpy(part).to(device)
+                predictions = [torch.sigmoid(model(signals, scalars).squeeze(-1)).cpu().numpy()
+                               for model in models]
+                results.extend(np.mean(predictions, axis=0).tolist())
+        return np.asarray(results, dtype=np.float64)
+
+    explainer = shap.KernelExplainer(score_fn, background.reshape(1, -1), link="identity")
+    target = scalar[center].numpy().reshape(1, -1)
+    values = explainer.shap_values(target, nsamples=64, silent=True)
+    if isinstance(values, list):
+        values = values[0]
+    values = np.asarray(values, dtype=float).reshape(-1, len(FEATURE_NAMES))[0]
+    return FEATURE_NAMES.copy(), values, float(np.asarray(explainer.expected_value).reshape(-1)[0]), float(score_fn(target)[0])
 
 
 def save_accelerometer_checkpoint(

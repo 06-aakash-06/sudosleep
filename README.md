@@ -33,8 +33,7 @@ experimental candidate scores.
 The dashboard can divide smoothed candidate runs by the sleep duration entered
 by the user to show an experimental AHI-like rate. It is not a clinical AHI,
 diagnosis, or validated apnea event count. Accelerometer proxy
-signals are not ECG reconstructions. SHAP explains the transparent heuristic
-score only; it does not explain the optional neural model's predictions.
+signals are not ECG reconstructions. SHAP explains the heuristic score. A compatible DREAMT model also supports approximate conditional SHAP for scalar features, holding waveform and other context fixed.
 
 ## Proposal pipeline status
 
@@ -43,9 +42,7 @@ The wearable path now includes per-record z-score normalization, EMD-based
 respiratory proxy, the CNN with squeeze-excitation channel attention and
 within-minute plus five-minute Transformer context, Viterbi sequence smoothing,
 and a user-entered sleep-time denominator for an experimental candidate rate.
-SHAP currently explains the heuristic score; it is not used to filter neural
-predictions. The proposal's Cheyne–Stokes constraint, sleep-stage/position/REM
-classification, and paired accelerometer/PSG validation are not implemented.
+SHAP explains the heuristic and, when a compatible checkpoint exists, conditional scalar contributions to the neural model; it does not explain waveform contributions. The proposal's Cheyne–Stokes constraint and sleep-stage/position/REM classification are not implemented. A DREAMT paired-PSG research evaluation is available once its local training run completes.
 The proposal's 16-month schedule and AUC target are plans, not results. The
 archived five-model checkpoint was trained in the ECG notebook and is not
 compatible with accelerometer input.
@@ -96,9 +93,30 @@ CSV** in the app. The loader streams only the selected time range and the
 timestamp, three accelerometer axes, and optional PSG sleep stage. It rejects
 segments with timestamp gaps rather than treating them as continuous. It keeps
 the original 32 Hz sensor rate when processing the distributed resampled CSVs.
-The released event-label fields still need to be checked after access; PSG
-sleep-stage labels are not respiratory-event labels. DREAMT is restricted data
-and must stay local under its data-use agreement.
+The local audit found sparse event fields encoded as 1 or blank. Treating blank as no marked event during scored sleep is a provisional interpretation: the supplied metadata does not explicitly define blanks. Observed marked-event rates were within 2 events/hour of the supplied PSG AHI for 98 of 100 subjects; the two discrepancies are excluded from the initial split. PSG sleep-stage labels are not respiratory-event labels. DREAMT is restricted data and must stay local under its data-use agreement.
+
+## DREAMT research workflow
+
+With the authorized files under `data/dreamt/DREAMT/`, run:
+
+```bash
+python audit_dreamt.py --workers 3
+python prepare_dreamt.py --split --prepare --workers 3
+python train_dreamt.py --epochs 8 --batch-size 2 --max-hours 4
+streamlit run app.py
+```
+
+Preparation is computationally intensive and can take many hours. The fixed split
+is by subject (68 train, 15 validation, 15 test, 2 excluded); scalar
+normalization and smoothing transitions are learned from training subjects only.
+A positive one-minute window requires at least one second of a marked event and
+at least 80% PSG-scored sleep. The held-out test is evaluated after model and
+threshold selection. Reports include a scalar random-forest baseline, window
+classification metrics, coarse event matching and candidate-run rate comparison.
+These experimental counts are not validated clinical AHI. The local overnight
+supervisor can resume missing caches with `python run_dreamt_overnight.py` and
+stores its status and logs under `data/dreamt/DREAMT/derived/`. Dataset files,
+subject-level results and trained artifacts are ignored by Git.
 
 ## Train an accelerometer model
 
@@ -119,9 +137,7 @@ python train_wearable.py labeled_accelerometer.csv \
 
 For a resampled DREAMT file with appropriate event labels, add `--sensor-rate 32`.
 The official DREAMT release requires a PhysioNet account and signed data-use
-agreement. Its published description confirms sleep-stage labels; event-level
-respiratory labels must be verified after authorized access. Sleep stages must
-not be used as apnea labels.
+agreement. The local event-label audit and its provisional interpretation are described above. Sleep stages must not be used as apnea labels.
 
 Training can take a while and requires PyTorch. The resulting checkpoint is
 ignored by Git; keep it locally or store it in an appropriate model-artifact
@@ -153,5 +169,7 @@ accelerometer path.
 - `siegen_dataset.py`: safe loading and timestamp reconstruction for the
   run-length encoded Siegen sleep-stage archive.
 - `dreamt_dataset.py`: bounded, rate-aware reading of authorized DREAMT CSVs.
+- `audit_dreamt.py`, `prepare_dreamt.py`, `train_dreamt.py`: local label audit, subject split, caching, training and evaluation.
+- `run_dreamt_overnight.py`: resumable preparation and training supervisor.
 - `pipeline.py`: original ECG research pipeline and CNN/Transformer model.
 - `pipelinefinal.ipynb`, `pipeline_v2.ipynb`: historical experiment notebooks.

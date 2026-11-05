@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import numpy as np
 import pandas as pd
@@ -10,13 +11,14 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 from scipy.signal import spectrogram
-from dreamt_dataset import DEFAULT_DIRECTORY as DREAMT_DIRECTORY, ORIGINAL_ACCEL_HZ, load_dreamt_segment
+from dreamt_dataset import DEFAULT_DIRECTORY as DREAMT_DIRECTORY, ORIGINAL_ACCEL_HZ, load_dreamt_segment, recording_start
 from siegen_dataset import DEFAULT_ARCHIVE, STAGE_NAMES, archive_records, load_segment, recording_info
 
 from wearable_pipeline import (
     apply_markov_smoothing,
     candidate_event_rate,
     default_transition_matrix,
+    explain_accelerometer_model_scalars,
     heuristic_shap_attributions,
     heuristic_scores,
     make_synthetic_demo,
@@ -122,9 +124,10 @@ st.warning(
 
 with st.sidebar:
     st.header("Recording")
+    dreamt_available = DREAMT_DIRECTORY.exists() and any(DREAMT_DIRECTORY.rglob("S*_df.csv"))
     source_choice = st.radio(
         "Data source", ["Siegen sleep study", "DREAMT CSV", "Upload CSV", "Synthetic demo"],
-        index=0 if DEFAULT_ARCHIVE.exists() else 2,
+        index=1 if dreamt_available else (0 if DEFAULT_ARCHIVE.exists() else 2),
     )
     uploaded = st.file_uploader("Upload accelerometer CSV", type=["csv"]) if source_choice == "Upload CSV" else None
     selected_study_record = None
@@ -151,11 +154,16 @@ with st.sidebar:
         else:
             st.info("Download the study with: python siegen_dataset.py --download")
     if source_choice == "DREAMT CSV":
-        files = sorted(DREAMT_DIRECTORY.rglob("*.csv")) if DREAMT_DIRECTORY.exists() else []
+        files = sorted(DREAMT_DIRECTORY.rglob("S*_df.csv")) if DREAMT_DIRECTORY.exists() else []
         if files:
             selected_dreamt_file = st.selectbox("DREAMT recording", files,
                                                 format_func=lambda path: str(path.relative_to(DREAMT_DIRECTORY)))
-            segment_start = st.number_input("Start minute", min_value=0, max_value=1440, value=0, step=1)
+            try:
+                first_minute = min(1440, int(np.ceil(recording_start(selected_dreamt_file) / 60)))
+            except Exception as exc:
+                st.error(f"Could not read the DREAMT recording: {exc}")
+                st.stop()
+            segment_start = st.number_input("Start minute", min_value=0, max_value=1440, value=first_minute, step=1)
             segment_minutes = st.number_input("Minutes to analyze", min_value=1, max_value=30, value=2, step=1)
         else:
             st.info("Put your authorized DREAMT CSV files under data/dreamt/.")
@@ -169,9 +177,10 @@ with st.sidebar:
         original_rate = st.number_input("Original accelerometer sampling rate (Hz)",
                                         min_value=8.0, max_value=1000.0, value=32.0, step=1.0,
                                         help="For DREAMT E4 acceleration, use 32 Hz even for the resampled 64/100 Hz files.")
+    dreamt_checkpoint = DREAMT_DIRECTORY / "DREAMT/derived/dreamt_accelerometer.pt"
     checkpoint_text = st.text_input(
         "Accelerometer-trained model checkpoint",
-        value="models/sudo_sleep_accelerometer.pt",
+        value=str(dreamt_checkpoint) if dreamt_checkpoint.exists() else "models/sudo_sleep_accelerometer.pt",
         help="Only checkpoints created by train_wearable.py are accepted.",
     )
     normal_stay = st.slider("Baseline normal-state persistence", 0.50, 0.99, 0.90, 0.01)
@@ -246,10 +255,30 @@ backend = "Signal heuristic"
 transition = default_transition_matrix(normal_stay, event_stay)
 model_note = "No accelerometer-trained checkpoint found; using the experimental heuristic."
 baseline_scores, contributions = heuristic_scores(data)
+explanation_data = data
+explanation_indices = np.arange(len(data["signals_3ch"]))
 
 if checkpoint_path.is_file():
     try:
-        scores, transition = predict_with_accelerometer_checkpoint(data, checkpoint_path)
+        if source_choice == "DREAMT CSV":
+            subject = selected_dreamt_file.name.split("_")[0]
+            cache_path = DREAMT_DIRECTORY / "DREAMT/derived/features" / f"{subject}.npz"
+            if not cache_path.is_file():
+                raise ValueError("The full-night feature cache is needed for consistent model normalization.")
+            with np.load(cache_path, allow_pickle=False) as cached:
+                signals, scalars = cached["signals"], cached["scalars"]
+                version = str(cached["preprocessing_version"])
+            first = int(segment_start)
+            indices = np.arange(first, first + len(data["signals_3ch"]))
+            if np.any(indices >= len(signals)):
+                raise ValueError("The selected segment extends beyond the full-night model cache.")
+            whole_night = {"signals_3ch": signals, "scalars": scalars,
+                           "labels": np.zeros(len(signals)), "records": np.full(len(signals), subject),
+                           "preprocessing_version": version}
+            scores, transition = predict_with_accelerometer_checkpoint(whole_night, checkpoint_path, indices=indices)
+            explanation_data, explanation_indices = whole_night, indices
+        else:
+            scores, transition = predict_with_accelerometer_checkpoint(data, checkpoint_path)
         backend = "Accelerometer CNN + Transformer ensemble"
         model_note = f"Loaded accelerometer checkpoint: {checkpoint_path}"
     except Exception as exc:
@@ -315,6 +344,35 @@ st.caption(
     "A candidate rate divided by sleep time is not validated AHI."
 )
 
+with st.expander("Model training and held-out evaluation"):
+    report_path = DREAMT_DIRECTORY / "DREAMT/derived/dreamt_results.json"
+    if report_path.is_file():
+        try:
+            report = json.loads(report_path.read_text())
+            st.warning(report.get("label_caveat", "Check label provenance before interpreting results."))
+            st.caption(report.get("note", ""))
+            st.write("CNN/Transformer held-out test:", report.get("test", {}))
+            st.write("Random-forest baseline held-out test:", report.get("baseline_test", {}))
+            st.write("Coarse candidate-run rate MAE versus PSG AHI:", report.get("test_candidate_rate_mae_vs_ahi"))
+            history = pd.DataFrame(report.get("training_history", []))
+            if not history.empty:
+                st.line_chart(history.set_index("epoch")[["validation_auprc"]])
+        except Exception as exc:
+            st.error(f"Could not read the local evaluation report: {exc}")
+    else:
+        st.info("No completed DREAMT training report is available yet.")
+        status_path = DREAMT_DIRECTORY / "DREAMT/derived/overnight_status.json"
+        if status_path.is_file():
+            try:
+                status = json.loads(status_path.read_text())
+                count = len(list((status_path.parent / "features").glob("*.npz")))
+                st.caption(f"Local run: {status.get('stage', 'unknown')} · {count} subject caches prepared · "
+                           f"last update {status.get('updated_utc', 'unknown')}")
+                if status.get("error"):
+                    st.error(status["error"])
+            except (OSError, ValueError):
+                st.caption("Local run status is temporarily unavailable.")
+
 record_names = [str(s["record"]) for s in data["record_summaries"]]
 selected_record = st.selectbox("Recording to inspect", record_names)
 summary = next(s for s in data["record_summaries"] if str(s["record"]) == selected_record)
@@ -340,6 +398,22 @@ if source_choice == "Siegen sleep study" or (source_choice == "DREAMT CSV" and "
 st.plotly_chart(signal_figure(summary), width="stretch")
 st.plotly_chart(spectrogram_figure(summary["resp_signal"]), width="stretch")
 
+if source_choice == "DREAMT CSV":
+    event_columns = {"psg_obstructive_apnea": "Obstructive apnea", "psg_central_apnea": "Central apnea",
+                     "psg_hypopnea": "Hypopnea", "psg_multiple_events": "Multiple events",
+                     "psg_mixed_apnea": "Mixed apnea"}
+    event_chart = go.Figure()
+    for column, label in event_columns.items():
+        if column in source_frame:
+            marked = pd.to_numeric(source_frame[column], errors="coerce").eq(1)
+            seconds = np.unique(np.floor(source_frame.loc[marked, "time_s"]).astype(int))
+            event_chart.add_trace(go.Scatter(x=seconds / 60.0, y=[label] * len(seconds),
+                                             mode="markers", marker={"size": 5}, name=label))
+    event_chart.update_layout(title="PSG-marked respiratory events", xaxis_title="Minutes into segment",
+                              height=280, showlegend=False, margin={"l": 10, "r": 10, "t": 55, "b": 10})
+    st.plotly_chart(event_chart, width="stretch")
+    st.caption("Only timestamps marked 1 are shown. Blank event fields are treated as provisional unmarked intervals in the research audit.")
+
 record_table = table[table["record"] == selected_record].reset_index(drop=True)
 record_indices = np.flatnonzero(records == selected_record)
 sequence = go.Figure()
@@ -353,7 +427,7 @@ sequence.add_trace(go.Scatter(
     mode="markers", name="Markov state: candidate",
     marker={"color": "#ef476f", "size": 9, "symbol": "diamond"},
 ))
-sequence.add_hline(y=0.5, line_dash="dash", line_color="gray")
+sequence.add_hline(y=float(raw_threshold), line_dash="dash", line_color="gray")
 sequence.update_layout(title="Per-minute candidate sequence", xaxis_title="Minute",
                        yaxis_title="Score (uncalibrated 0–1)", height=350,
                        margin={"l": 10, "r": 10, "t": 55, "b": 10})
@@ -367,7 +441,7 @@ st.caption(
 )
 selected_minute = st.selectbox(
     "Minute to explain", record_table["minute"].tolist(),
-    index=int(np.argmax(baseline_scores[record_indices])),
+    index=int(np.argmax(scores[record_indices])),
 )
 selected_position = int(record_table.index[record_table["minute"] == selected_minute][0])
 selected_row_index = int(record_indices[selected_position])
@@ -402,6 +476,26 @@ except Exception as exc:
     drivers.update_layout(xaxis_title="Contribution to heuristic score", height=260,
                           margin={"l": 10, "r": 10, "t": 20, "b": 10})
     st.plotly_chart(drivers, width="stretch")
+
+if backend == "Accelerometer CNN + Transformer ensemble":
+    st.subheader("CNN/Transformer scalar explanation")
+    st.caption("Approximate Kernel SHAP changes the selected minute's scalar features relative to the training median while holding the signal and other context fixed. It does not explain waveform contributions.")
+    if st.button("Explain selected model prediction"):
+        try:
+            with st.spinner("Calculating model scalar attributions..."):
+                names, values, expected, predicted = explain_accelerometer_model_scalars(
+                    explanation_data, checkpoint_path, int(explanation_indices[selected_row_index])
+                )
+            order = np.argsort(np.abs(values))
+            model_shap = go.Figure(go.Bar(
+                x=values[order], y=np.asarray(names)[order], orientation="h",
+                marker_color=["#ef476f" if value >= 0 else "#159895" for value in values[order]],
+            ))
+            model_shap.update_layout(xaxis_title="Conditional SHAP effect on model probability", height=420)
+            st.plotly_chart(model_shap, width="stretch")
+            st.caption(f"Model probability {predicted:.3f}; background probability {expected:.3f}.")
+        except Exception as exc:
+            st.error(f"Could not explain the model prediction: {exc}")
 
 with st.expander("Minute-level output"):
     st.dataframe(record_table, width="stretch", hide_index=True)
