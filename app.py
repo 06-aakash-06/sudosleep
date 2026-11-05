@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 from scipy.signal import spectrogram
+from siegen_dataset import DEFAULT_ARCHIVE, STAGE_NAMES, archive_records, load_segment, recording_info
 
 from wearable_pipeline import (
     apply_markov_smoothing,
@@ -28,6 +29,17 @@ st.set_page_config(
     page_icon="🌙",
     layout="wide",
 )
+
+
+@st.cache_data(show_spinner=False)
+def cached_siegen_segment(archive_path: str, record: str, start: float, duration: float,
+                          archive_mtime_ns: int) -> pd.DataFrame:
+    return load_segment(Path(archive_path), record, start, duration)
+
+
+@st.cache_data(show_spinner=False)
+def cached_preprocess(frame: pd.DataFrame, sample_rate: float) -> dict:
+    return preprocess_accelerometer(frame, sample_rate_hz=sample_rate)
 
 
 def signal_figure(summary: dict, downsample_limit: int = 12000) -> go.Figure:
@@ -103,7 +115,33 @@ st.warning(
 
 with st.sidebar:
     st.header("Recording")
-    uploaded = st.file_uploader("Upload accelerometer CSV", type=["csv"])
+    source_choice = st.radio(
+        "Data source", ["Siegen sleep study", "Upload CSV", "Synthetic demo"],
+        index=0 if DEFAULT_ARCHIVE.exists() else 1,
+    )
+    uploaded = st.file_uploader("Upload accelerometer CSV", type=["csv"]) if source_choice == "Upload CSV" else None
+    selected_study_record = None
+    segment_start = 0
+    segment_minutes = 2
+    if source_choice == "Siegen sleep study":
+        if DEFAULT_ARCHIVE.is_file():
+            try:
+                study_records = archive_records(DEFAULT_ARCHIVE)
+                selected_study_record = st.selectbox("Study recording", study_records)
+                study_info = recording_info(DEFAULT_ARCHIVE, selected_study_record)
+                max_start = max(0, int(study_info["duration_seconds"] // 60) - 1)
+                initial_start = min(max_start, int(study_info["first_sleep_seconds"] // 60))
+                segment_start = st.number_input("Start minute", min_value=0, max_value=max_start,
+                                                value=initial_start, step=1)
+                max_minutes = max(1, min(30, int((study_info["duration_seconds"] - 60 * segment_start) // 60)))
+                segment_minutes = st.number_input("Minutes to analyze", min_value=1, max_value=max_minutes,
+                                                  value=min(2, max_minutes), step=1)
+                st.caption("Select a short segment first: EMD can be slow for long recordings.")
+            except Exception as exc:
+                st.error(f"Could not read the study archive: {exc}")
+                st.stop()
+        else:
+            st.info("Download the study with: python siegen_dataset.py --download")
     fallback_hz = st.number_input(
         "Sampling rate when timestamps are absent (Hz)",
         min_value=8.0, max_value=1000.0, value=50.0, step=1.0,
@@ -126,11 +164,12 @@ st.markdown(
     "→ Markov/Viterbi sequence smoothing → candidate-event summary → feature drivers."
 )
 
-if uploaded is None and not st.session_state.get("synthetic_demo", False):
+if source_choice == "Siegen sleep study" and selected_study_record is None:
+    st.info("The Siegen dataset archive is not available locally. See the sidebar for the download command.")
+    st.stop()
+
+if source_choice == "Upload CSV" and uploaded is None:
     st.info("Upload a CSV to inspect motion signals and candidate respiratory windows.")
-    if st.button("Run the synthetic demonstration"):
-        st.session_state["synthetic_demo"] = True
-        st.rerun()
     with st.expander("What the model can and cannot do"):
         st.write(
             "The CNN plus two Transformer stages are implemented in pipeline.py. "
@@ -144,14 +183,26 @@ if uploaded is None and not st.session_state.get("synthetic_demo", False):
     st.stop()
 
 try:
-    if uploaded is not None:
-        st.session_state["synthetic_demo"] = False
+    if source_choice == "Siegen sleep study":
+        with st.spinner("Reading and expanding the selected study segment..."):
+            source_frame = cached_siegen_segment(
+                str(DEFAULT_ARCHIVE), selected_study_record,
+                float(segment_start) * 60, float(segment_minutes) * 60,
+                DEFAULT_ARCHIVE.stat().st_mtime_ns,
+            )
+        st.info(
+            "The Siegen archive provides PSG sleep stages, not respiratory-event labels. "
+            "This segment can demonstrate signal processing but cannot validate apnea detection or AHI. "
+            "Sensor values are uncalibrated counts."
+        )
+    elif source_choice == "Upload CSV":
         uploaded.seek(0)
         source_frame = pd.read_csv(uploaded)
     else:
         source_frame = make_synthetic_demo()
         st.info("Showing a synthetic example only; these are generated signals, not recorded patient data.")
-    data = preprocess_accelerometer(source_frame, sample_rate_hz=float(fallback_hz))
+    with st.spinner("Extracting signal features and EMD motion proxy..."):
+        data = cached_preprocess(source_frame, float(fallback_hz))
 except Exception as exc:
     st.error(f"Could not process this recording: {exc}")
     st.stop()
@@ -178,14 +229,23 @@ states = apply_markov_smoothing(scores, records, transition)
 event_runs, total_hours, events_per_hour = candidate_event_rate(
     states, records, np.asarray(data["valid_seconds"])
 )
-default_sleep_hours = min(max(total_hours, 0.05), 24.0)
-estimated_sleep_hours = st.number_input(
-    "Estimated sleep hours covered by these recordings",
-    min_value=0.05, max_value=24.0, value=default_sleep_hours, step=0.25,
-    help="The default assumes all recorded time was sleep. Adjust it if you know the actual sleep duration.",
-)
-candidate_runs_per_sleep_hour = event_runs / max(float(estimated_sleep_hours), 1e-8)
 table = build_epoch_table(data, scores, contributions, states, float(raw_threshold))
+if source_choice == "Siegen sleep study":
+    minute_stages = []
+    for _, row in table.iterrows():
+        start = float(row["start_seconds"])
+        stop = start + float(row["window_seconds"])
+        codes = source_frame.loc[(source_frame["time_s"] >= start) & (source_frame["time_s"] < stop),
+                                 "sleep_stage_code"]
+        minute_stages.append(STAGE_NAMES.get(int(codes.value_counts().index[0]), "Unknown") if len(codes) else "Unknown")
+    table["psg_sleep_stage_majority"] = minute_stages
+    staged_sleep_hours = float(source_frame["sleep_stage_code"].isin([1, 2, 3, 5]).sum() / 100.0 / 3600.0)
+else:
+    estimated_sleep_hours = st.number_input(
+        "Estimated sleep hours covered by these recordings (0 if unknown)",
+        min_value=0.0, max_value=24.0, value=0.0, step=0.05, format="%.3f",
+        help="Enter actual estimated sleep time, not just the length of the recording.",
+    )
 
 st.caption(model_note)
 unavailable = [str(s["record"]) for s in data["record_summaries"]
@@ -196,23 +256,46 @@ methods = sorted({str(s["cardiac_method"]) for s in data["record_summaries"]
                  if s["cardiac_available"]})
 if methods and methods != ["EMD IMF reconstruction"]:
     st.info("SCG proxy method in use: " + ", ".join(methods) + ".")
+empty_proxy = [str(s["record"]) for s in data["record_summaries"]
+               if s["cardiac_available"] and not s["cardiac_nonzero"]]
+if empty_proxy:
+    st.info("No cardiac-band components were selected for: " + ", ".join(empty_proxy))
 
 raw_candidates = int(np.sum(scores >= raw_threshold))
 candidate_windows = int(np.sum(states == 1))
 left, middle, right = st.columns(3)
 left.metric("Raw candidate windows", raw_candidates)
 middle.metric("Smoothed candidate runs", event_runs)
-right.metric("Candidate runs per estimated sleep hour", f"{candidate_runs_per_sleep_hour:.1f}")
+if source_choice == "Siegen sleep study":
+    right.metric("PSG-staged sleep in segment", f"{staged_sleep_hours * 60:.1f} min")
+elif estimated_sleep_hours > 0:
+    right.metric("Candidate runs per estimated sleep hour", f"{event_runs / estimated_sleep_hours:.1f}")
+else:
+    right.metric("Candidate runs per estimated sleep hour", "—")
 st.caption(f"Analyzed {total_hours:.2f} recorded hours using **{backend}**.")
 st.caption(
-    "This is an experimental AHI-like rate: smoothed candidate runs divided by "
-    "the sleep duration you entered. It is not clinical AHI because the event "
-    "detector and sleep-time estimate are not validated."
+    "Candidate runs are exploratory signal patterns, not scored respiratory events. "
+    "A candidate rate divided by sleep time is not validated AHI."
 )
 
 record_names = [str(s["record"]) for s in data["record_summaries"]]
 selected_record = st.selectbox("Recording to inspect", record_names)
 summary = next(s for s in data["record_summaries"] if str(s["record"]) == selected_record)
+if source_choice == "Siegen sleep study":
+    stages = source_frame[["time_s", "sleep_stage_code"]].copy()
+    stages["period"] = (stages["time_s"] // 30).astype(int)
+    stage_summary = stages.groupby("period", sort=True)["sleep_stage_code"].agg(
+        lambda values: values.value_counts().index[0]
+    ).reset_index()
+    stage_summary["stage"] = stage_summary["sleep_stage_code"].map(STAGE_NAMES).fillna("Unknown")
+    stage_fig = go.Figure(go.Scatter(
+        x=stage_summary["period"] * 0.5, y=stage_summary["stage"],
+        mode="lines+markers", line_shape="hv", name="PSG sleep stage",
+    ))
+    stage_fig.update_layout(title="PSG sleep stages (30-second summaries)",
+                            xaxis_title="Minutes into selected segment", yaxis_title="Sleep stage",
+                            height=280, margin={"l": 10, "r": 10, "t": 55, "b": 10})
+    st.plotly_chart(stage_fig, width="stretch")
 st.plotly_chart(signal_figure(summary), width="stretch")
 st.plotly_chart(spectrogram_figure(summary["resp_signal"]), width="stretch")
 

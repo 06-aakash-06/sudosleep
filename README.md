@@ -63,18 +63,39 @@ streamlit run app.py
 ```
 
 Upload a CSV containing columns named `x`, `y`, and `z` (or common equivalents
-such as `acc_x`, `acc_y`, `acc_z`). A timestamp column is optional; when it is
+such as `acc_x`, `acc_y`, `acc_z`, or `accel_x`, `accel_y`, `accel_z`). A timestamp column is optional; when it is
 absent, enter the sensor's sampling rate in the sidebar. The app expects
 roughly uniform sampling and at least 30 seconds of usable signal. Sampling
 rates below 40 Hz do not produce a cardiac-band proxy.
+
+To explore the University of Siegen ICHI 2014 study in the dashboard, download
+its archive locally and select **Siegen sleep study** in the sidebar:
+
+```bash
+python siegen_dataset.py --download
+streamlit run app.py
+```
+
+The app reads a selected short segment directly from the ZIP. It expands the
+run-length encoding and regularizes the original timestamps to a 100 Hz grid;
+the stored axes are uncalibrated integer sensor counts. The archive has 47
+recording files from 42 patients, some with multiple recordings. Its PSG labels
+describe sleep stages, not apnea events. They are shown separately and never
+used as apnea training labels. A zero EMD proxy means no component met the
+current experimental selection rule, not that cardiac activity was absent.
+The data stay in the ignored `data/` directory. The [dataset authors](https://www.eti.uni-siegen.de/ubicomp/home/datasets/ichi14/)
+permit scientific non-commercial use with attribution.
 
 ## Train an accelerometer model
 
 The training CSV must contain three axis columns, a `label` column with a
 minute-level binary apnea label repeated for samples in that minute, and a
-`record` column identifying independent recordings or subjects. Supply at
-least five independent records for the default subject-grouped five-fold
-training.
+`record` column identifying each recording. For multiple nights from the same
+person, also include a `subject` column so every night from that person stays
+in the same validation fold. If `subject` is absent, the trainer assumes each
+record is a different subject. Supply at least five independent subjects for the
+default subject-grouped five-fold training. Sleep-stage codes from the Siegen
+study are not apnea labels and cannot be used to train this classifier.
 
 ```bash
 python train_wearable.py labeled_accelerometer.csv \
@@ -84,7 +105,9 @@ python train_wearable.py labeled_accelerometer.csv \
 
 Training can take a while and requires PyTorch. The resulting checkpoint is
 ignored by Git; keep it locally or store it in an appropriate model-artifact
-service. Do not use an ECG-trained checkpoint for accelerometer recordings.
+service. Checkpoints record their preprocessing version and feature names;
+older or mismatched checkpoints must be retrained. Do not use an ECG-trained
+checkpoint for accelerometer recordings.
 
 ## ECG benchmark data
 
@@ -107,5 +130,7 @@ accelerometer path.
 - `wearable_pipeline.py`: accelerometer preprocessing, proxy extraction,
   heuristic scoring, sequence smoothing, and optional compatible model loading.
 - `train_wearable.py`: subject-grouped training for labeled accelerometer CSVs.
+- `siegen_dataset.py`: safe loading and timestamp reconstruction for the
+  run-length encoded Siegen sleep-stage archive.
 - `pipeline.py`: original ECG research pipeline and CNN/Transformer model.
 - `pipelinefinal.ipynb`, `pipeline_v2.ipynb`: historical experiment notebooks.

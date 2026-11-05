@@ -36,9 +36,9 @@ FEATURE_NAMES = [
 ]
 
 _AXIS_ALIASES = {
-    "x": {"x", "ax", "accx", "accelerometerx", "accelerationx"},
-    "y": {"y", "ay", "accy", "accelerometery", "accelerationy"},
-    "z": {"z", "az", "accz", "accelerometerz", "accelerationz"},
+    "x": {"x", "ax", "accx", "accelx", "accelerometerx", "accelerationx"},
+    "y": {"y", "ay", "accy", "accely", "accelerometery", "accelerationy"},
+    "z": {"z", "az", "accz", "accelz", "accelerometerz", "accelerationz"},
 }
 _TIME_ALIASES = {"time", "timestamp", "datetime", "ts", "time_s", "timestamp_s"}
 
@@ -377,6 +377,7 @@ def _process_record(
         "pause_fraction": pause_fraction,
         "cardiac_available": cardiac_available,
         "cardiac_method": "EMD IMF reconstruction" if emd_used else "bandpass fallback",
+        "cardiac_nonzero": bool(np.any(np.abs(cardiac) > 1e-8)),
         "sample_rate_hz": resolved_hz,
         "samples_model_fs": raw,
         "resp_signal": resp,
@@ -420,6 +421,7 @@ def preprocess_accelerometer(
             "sample_rate_hz": float(r["sample_rate_hz"]),
             "cardiac_available": bool(r["cardiac_available"]),
             "cardiac_method": r["cardiac_method"],
+            "cardiac_nonzero": bool(r["cardiac_nonzero"]),
             "samples_model_fs": r["samples_model_fs"],
             "resp_signal": r["resp_signal"],
             "cardiac_proxy": r["cardiac_proxy"],
@@ -428,6 +430,7 @@ def preprocess_accelerometer(
     ]
     combined["feature_names"] = FEATURE_NAMES.copy()
     combined["model_fs"] = MODEL_FS
+    combined["preprocessing_version"] = "emd_scg_v1" if EMD is not None else "bandpass_fallback_v1"
     return combined
 
 
@@ -459,22 +462,25 @@ def make_synthetic_demo(duration_minutes: int = 8,
 
 
 def heuristic_scores(precomputed: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
-    """Return uncalibrated 0..1 scores and additive heuristic contributions."""
+    """Return uncalibrated scores using a separate baseline for each record."""
     scalars = np.nan_to_num(precomputed["scalars"], nan=0.0, posinf=0.0, neginf=0.0)
     amp = np.maximum(scalars[:, 2], 0.0)
     variability = np.maximum(scalars[:, 3], 0.0)
     pause = np.clip(np.nan_to_num(precomputed["pause_fraction"]), 0.0, 1.0)
-    base_amp = max(float(np.percentile(amp[amp > 1e-8], 75)) if np.any(amp > 1e-8) else 0.0, 1e-8)
-    base_var = max(float(np.percentile(variability[variability > 1e-8], 75))
-                   if np.any(variability > 1e-8) else 0.0, 1e-8)
-    amp_suppression = np.clip((0.85 - amp / base_amp) / 0.85, 0.0, 1.0)
-    var_suppression = np.clip((0.85 - variability / base_var) / 0.85, 0.0, 1.0)
-    pause_driver = np.clip((pause - 0.08) / 0.42, 0.0, 1.0)
-    contributions = np.column_stack([
-        0.35 * amp_suppression,
-        0.20 * var_suppression,
-        0.45 * pause_driver,
-    ])
+    records = np.asarray(precomputed.get("records", np.zeros(len(amp), dtype=int)))
+    contributions = np.zeros((len(amp), 3), dtype=np.float64)
+    for record in np.unique(records):
+        idx = np.flatnonzero(records == record)
+        record_amp, record_var = amp[idx], variability[idx]
+        base_amp = max(float(np.percentile(record_amp[record_amp > 1e-8], 75))
+                       if np.any(record_amp > 1e-8) else 0.0, 1e-8)
+        base_var = max(float(np.percentile(record_var[record_var > 1e-8], 75))
+                       if np.any(record_var > 1e-8) else 0.0, 1e-8)
+        contributions[idx] = np.column_stack([
+            0.35 * np.clip((0.85 - record_amp / base_amp) / 0.85, 0.0, 1.0),
+            0.20 * np.clip((0.85 - record_var / base_var) / 0.85, 0.0, 1.0),
+            0.45 * np.clip((pause[idx] - 0.08) / 0.42, 0.0, 1.0),
+        ])
     scores = np.clip(contributions.sum(axis=1), 0.01, 0.99)
     return scores.astype(np.float32), contributions.astype(np.float32)
 
@@ -502,6 +508,11 @@ def heuristic_shap_attributions(
     )
     if not 0 <= sample_index < len(scalars):
         raise IndexError("Selected minute is outside the processed recording.")
+
+    records = np.asarray(precomputed.get("records", np.zeros(len(scalars), dtype=int)))
+    same_record = np.flatnonzero(records == records[sample_index])
+    sample_index = int(np.flatnonzero(same_record == sample_index)[0])
+    scalars, pauses = scalars[same_record], pauses[same_record]
 
     inputs = np.column_stack([np.maximum(scalars[:, 2], 0.0),
                               np.maximum(scalars[:, 3], 0.0), pauses])
@@ -638,6 +649,10 @@ def predict_with_accelerometer_checkpoint(
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     if not isinstance(checkpoint, dict) or checkpoint.get("input_modality") != "accelerometer":
         raise ValueError("Checkpoint is not tagged as trained for accelerometer input.")
+    if checkpoint.get("preprocessing_version") != precomputed.get("preprocessing_version"):
+        raise ValueError("Checkpoint preprocessing does not match the current signal pipeline. Retrain it with this version.")
+    if checkpoint.get("feature_names") != FEATURE_NAMES:
+        raise ValueError("Checkpoint feature definitions do not match the current pipeline.")
     states = checkpoint.get("model_states")
     if not states:
         raise ValueError("Checkpoint contains no model weights.")
@@ -664,7 +679,7 @@ def predict_with_accelerometer_checkpoint(
 
 def save_accelerometer_checkpoint(
     models: list[Any], metrics: dict[str, Any], labels: np.ndarray,
-    records: np.ndarray, output_path: str | Path,
+    records: np.ndarray, output_path: str | Path, preprocessing_version: str,
 ) -> None:
     import torch
     from torch.optim.swa_utils import AveragedModel
@@ -676,8 +691,9 @@ def save_accelerometer_checkpoint(
             else model.state_dict()
         )
     artifact = {
-        "artifact_version": 1,
+        "artifact_version": 2,
         "input_modality": "accelerometer",
+        "preprocessing_version": preprocessing_version,
         "architecture": "SudoSleepNet",
         "feature_names": FEATURE_NAMES,
         "model_states": model_states,

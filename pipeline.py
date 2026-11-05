@@ -713,6 +713,7 @@ def train_model(
     scalars  = np.nan_to_num(precomputed["scalars"])
     labels   = precomputed["labels"]
     records  = precomputed["records"]
+    groups   = precomputed.get("groups", records)
 
     gkf = GroupKFold(n_splits=n_folds)
     ensemble: List[nn.Module] = []
@@ -723,7 +724,7 @@ def train_model(
     swa_start_epoch = int(epochs * swa_start_frac)
 
     for fold, (tr_idx, va_idx) in enumerate(
-            gkf.split(np.arange(len(labels)), labels, records)):
+            gkf.split(np.arange(len(labels)), labels, groups)):
         logger.info(f"── FOLD {fold+1}/{n_folds} ──")
 
         # --- per-fold positive weight ---
