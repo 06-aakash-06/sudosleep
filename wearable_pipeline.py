@@ -254,9 +254,15 @@ def _process_record(
     fallback_hz: float,
     time_column: str | None,
     label_column: str | None,
+    original_sensor_rate_hz: float | None,
 ) -> dict[str, Any]:
     axis_columns = _find_axis_columns(frame)
     resolved_hz, detected_time = infer_sample_rate(frame, fallback_hz, time_column)
+    if original_sensor_rate_hz is not None and (not np.isfinite(original_sensor_rate_hz) or original_sensor_rate_hz < 8):
+        raise ValueError("Original sensor rate must be at least 8 Hz.")
+    # A resampled file cannot restore frequency content above its own Nyquist
+    # or above the original sensor's Nyquist.
+    effective_sensor_hz = min(resolved_hz, original_sensor_rate_hz or resolved_hz)
     time_name = detected_time
     axis_values = frame[[axis_columns["x"], axis_columns["y"], axis_columns["z"]]].apply(
         pd.to_numeric, errors="coerce"
@@ -291,7 +297,7 @@ def _process_record(
     )
     resp_axis = int(np.argmax(np.std(resp_axes, axis=1)))
     resp = resp_axes[resp_axis]
-    cardiac_available = resolved_hz >= 40.0
+    cardiac_available = effective_sensor_hz * 0.48 > 10.0
     cardiac = np.zeros_like(raw)
     emd_used = False
     if cardiac_available:
@@ -301,7 +307,7 @@ def _process_record(
             stop = min(start + EPOCH_SAMPLES, len(raw))
             axis_proxies = []
             for axis in resampled_axes:
-                proxy, used_emd = _emd_scg_proxy(axis[start:stop], resolved_hz)
+                proxy, used_emd = _emd_scg_proxy(axis[start:stop], effective_sensor_hz)
                 axis_proxies.append(proxy)
                 emd_used = emd_used or used_emd
             best_axis = int(np.argmax([_safe_std(proxy) for proxy in axis_proxies]))
@@ -379,6 +385,7 @@ def _process_record(
         "cardiac_method": "EMD IMF reconstruction" if emd_used else "bandpass fallback",
         "cardiac_nonzero": bool(np.any(np.abs(cardiac) > 1e-8)),
         "sample_rate_hz": resolved_hz,
+        "original_sensor_rate_hz": effective_sensor_hz,
         "samples_model_fs": raw,
         "resp_signal": resp,
         "cardiac_proxy": cardiac,
@@ -391,6 +398,7 @@ def preprocess_accelerometer(
     time_column: str | None = None,
     record_column: str | None = None,
     label_column: str | None = None,
+    original_sensor_rate_hz: float | None = None,
 ) -> dict[str, Any]:
     """Create one-minute, 3-channel motion windows and 12 scalar features."""
     if frame.empty:
@@ -406,7 +414,7 @@ def preprocess_accelerometer(
         if pd.isna(name):
             continue
         records.append(_process_record(
-            part, str(name), sample_rate_hz, time_column, label_column
+            part, str(name), sample_rate_hz, time_column, label_column, original_sensor_rate_hz
         ))
     if not records:
         raise ValueError("No usable recordings were found in the CSV.")
@@ -419,6 +427,7 @@ def preprocess_accelerometer(
         {
             "record": str(r["records"][0]),
             "sample_rate_hz": float(r["sample_rate_hz"]),
+            "original_sensor_rate_hz": float(r["original_sensor_rate_hz"]),
             "cardiac_available": bool(r["cardiac_available"]),
             "cardiac_method": r["cardiac_method"],
             "cardiac_nonzero": bool(r["cardiac_nonzero"]),
@@ -430,7 +439,7 @@ def preprocess_accelerometer(
     ]
     combined["feature_names"] = FEATURE_NAMES.copy()
     combined["model_fs"] = MODEL_FS
-    combined["preprocessing_version"] = "emd_scg_v1" if EMD is not None else "bandpass_fallback_v1"
+    combined["preprocessing_version"] = "emd_scg_v2_rate_aware" if EMD is not None else "bandpass_fallback_v2_rate_aware"
     return combined
 
 

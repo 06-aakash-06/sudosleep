@@ -66,7 +66,10 @@ Upload a CSV containing columns named `x`, `y`, and `z` (or common equivalents
 such as `acc_x`, `acc_y`, `acc_z`, or `accel_x`, `accel_y`, `accel_z`). A timestamp column is optional; when it is
 absent, enter the sensor's sampling rate in the sidebar. The app expects
 roughly uniform sampling and at least 30 seconds of usable signal. Sampling
-rates below 40 Hz do not produce a cardiac-band proxy.
+rates must support frequencies above 10 Hz to produce a cardiac-band proxy.
+For resampled input, specify the original sensor rate in the sidebar. DREAMT's
+accelerometer was recorded at 32 Hz even when the distributed file is at 100 Hz;
+its usable proxy band is therefore limited to approximately 10–15.4 Hz.
 
 To explore the University of Siegen ICHI 2014 study in the dashboard, download
 its archive locally and select **Siegen sleep study** in the sidebar:
@@ -86,6 +89,17 @@ current experimental selection rule, not that cardiac activity was absent.
 The data stay in the ignored `data/` directory. The [dataset authors](https://www.eti.uni-siegen.de/ubicomp/home/datasets/ichi14/)
 permit scientific non-commercial use with attribution.
 
+For DREAMT, obtain approved access and download version 2.2 from the
+[official PhysioNet page](https://physionet.org/content/dreamt/2.2.0/).
+Place authorized CSV files anywhere under `data/dreamt/`, then choose **DREAMT
+CSV** in the app. The loader streams only the selected time range and the
+timestamp, three accelerometer axes, and optional PSG sleep stage. It rejects
+segments with timestamp gaps rather than treating them as continuous. It keeps
+the original 32 Hz sensor rate when processing the distributed resampled CSVs.
+The released event-label fields still need to be checked after access; PSG
+sleep-stage labels are not respiratory-event labels. DREAMT is restricted data
+and must stay local under its data-use agreement.
+
 ## Train an accelerometer model
 
 The training CSV must contain three axis columns, a `label` column with a
@@ -102,6 +116,12 @@ python train_wearable.py labeled_accelerometer.csv \
   --sample-rate 50 \
   --output models/sudo_sleep_accelerometer.pt
 ```
+
+For a resampled DREAMT file with appropriate event labels, add `--sensor-rate 32`.
+The official DREAMT release requires a PhysioNet account and signed data-use
+agreement. Its published description confirms sleep-stage labels; event-level
+respiratory labels must be verified after authorized access. Sleep stages must
+not be used as apnea labels.
 
 Training can take a while and requires PyTorch. The resulting checkpoint is
 ignored by Git; keep it locally or store it in an appropriate model-artifact
@@ -132,5 +152,6 @@ accelerometer path.
 - `train_wearable.py`: subject-grouped training for labeled accelerometer CSVs.
 - `siegen_dataset.py`: safe loading and timestamp reconstruction for the
   run-length encoded Siegen sleep-stage archive.
+- `dreamt_dataset.py`: bounded, rate-aware reading of authorized DREAMT CSVs.
 - `pipeline.py`: original ECG research pipeline and CNN/Transformer model.
 - `pipelinefinal.ipynb`, `pipeline_v2.ipynb`: historical experiment notebooks.

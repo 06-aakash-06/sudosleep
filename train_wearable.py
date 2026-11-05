@@ -16,6 +16,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("csv", help="CSV with x/y/z, label, and record columns")
     parser.add_argument("--sample-rate", type=float, default=50.0,
                         help="Fallback sample rate when timestamps are absent")
+    parser.add_argument("--sensor-rate", type=float, default=None,
+                        help="Original accelerometer rate before any file resampling, e.g. 32 for DREAMT")
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--folds", type=int, default=5)
@@ -53,6 +55,7 @@ def main() -> None:
         sample_rate_hz=args.sample_rate,
         record_column=record_col,
         label_column=label_col,
+        original_sensor_rate_hz=args.sensor_rate,
     )
     labels = np.asarray(data["labels"], dtype=np.float32)
     records = np.asarray(data["records"])

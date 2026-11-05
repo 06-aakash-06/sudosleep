@@ -3,13 +3,15 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 from pathlib import Path
 
 import numpy as np
 
 from siegen_dataset import archive_records, load_segment, recording_info
-from wearable_pipeline import _find_axis_columns, infer_sample_rate, heuristic_scores, heuristic_shap_attributions
+from dreamt_dataset import load_dreamt_segment
+from wearable_pipeline import _find_axis_columns, infer_sample_rate, heuristic_scores, heuristic_shap_attributions, preprocess_accelerometer
 
 
 class SiegenDatasetTest(unittest.TestCase):
@@ -76,6 +78,32 @@ class SiegenDatasetTest(unittest.TestCase):
         _, values, expected, predicted = heuristic_shap_attributions(data, 3)
         self.assertAlmostEqual(predicted, float(scores[3]), places=5)
         self.assertAlmostEqual(expected + values.sum(), predicted, places=5)
+
+    def test_resampled_file_respects_original_sensor_rate(self):
+        import pandas as pd
+        times = np.arange(3001) / 100.0
+        frame = pd.DataFrame({"TIMESTAMP": times, "ACC_X": np.sin(times),
+                              "ACC_Y": np.cos(times), "ACC_Z": np.ones(len(times))})
+        def proxy(signal, source_hz):
+            self.assertEqual(source_hz, 32.0)
+            return np.zeros(len(signal), dtype=np.float32), True
+        with patch("wearable_pipeline._emd_scg_proxy", side_effect=proxy) as mocked:
+            result = preprocess_accelerometer(frame, original_sensor_rate_hz=32.0)
+        self.assertTrue(mocked.called)
+        self.assertAlmostEqual(result["record_summaries"][0]["sample_rate_hz"], 100.0, places=3)
+        self.assertEqual(result["record_summaries"][0]["original_sensor_rate_hz"], 32.0)
+
+    def test_dreamt_segment_reads_axes_and_stage_without_fabricating_labels(self):
+        import pandas as pd
+        times = np.arange(6100) / 100.0
+        path = Path(self.tmp.name) / "participant.csv"
+        pd.DataFrame({"TIMESTAMP": times, "ACC_X": np.sin(times), "ACC_Y": np.cos(times),
+                      "ACC_Z": 1, "Sleep_Stage": "N2", "ECG": 9}).to_csv(path, index=False)
+        frame = load_dreamt_segment(path, 10, 30, chunksize=500)
+        self.assertEqual(len(frame), 3000)
+        self.assertEqual(frame.psg_sleep_stage.iloc[0], "N2")
+        self.assertNotIn("label", frame.columns)
+        self.assertNotIn("ECG", frame.columns)
 
 
 if __name__ == "__main__":

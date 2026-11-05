@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 from scipy.signal import spectrogram
+from dreamt_dataset import DEFAULT_DIRECTORY as DREAMT_DIRECTORY, ORIGINAL_ACCEL_HZ, load_dreamt_segment
 from siegen_dataset import DEFAULT_ARCHIVE, STAGE_NAMES, archive_records, load_segment, recording_info
 
 from wearable_pipeline import (
@@ -38,8 +39,14 @@ def cached_siegen_segment(archive_path: str, record: str, start: float, duration
 
 
 @st.cache_data(show_spinner=False)
-def cached_preprocess(frame: pd.DataFrame, sample_rate: float) -> dict:
-    return preprocess_accelerometer(frame, sample_rate_hz=sample_rate)
+def cached_preprocess(frame: pd.DataFrame, sample_rate: float, sensor_rate: float | None) -> dict:
+    return preprocess_accelerometer(frame, sample_rate_hz=sample_rate,
+                                    original_sensor_rate_hz=sensor_rate)
+
+
+@st.cache_data(show_spinner=False)
+def cached_dreamt_segment(path: str, start: float, duration: float, file_mtime_ns: int) -> pd.DataFrame:
+    return load_dreamt_segment(Path(path), start, duration)
 
 
 def signal_figure(summary: dict, downsample_limit: int = 12000) -> go.Figure:
@@ -116,11 +123,12 @@ st.warning(
 with st.sidebar:
     st.header("Recording")
     source_choice = st.radio(
-        "Data source", ["Siegen sleep study", "Upload CSV", "Synthetic demo"],
-        index=0 if DEFAULT_ARCHIVE.exists() else 1,
+        "Data source", ["Siegen sleep study", "DREAMT CSV", "Upload CSV", "Synthetic demo"],
+        index=0 if DEFAULT_ARCHIVE.exists() else 2,
     )
     uploaded = st.file_uploader("Upload accelerometer CSV", type=["csv"]) if source_choice == "Upload CSV" else None
     selected_study_record = None
+    selected_dreamt_file = None
     segment_start = 0
     segment_minutes = 2
     if source_choice == "Siegen sleep study":
@@ -142,11 +150,25 @@ with st.sidebar:
                 st.stop()
         else:
             st.info("Download the study with: python siegen_dataset.py --download")
+    if source_choice == "DREAMT CSV":
+        files = sorted(DREAMT_DIRECTORY.rglob("*.csv")) if DREAMT_DIRECTORY.exists() else []
+        if files:
+            selected_dreamt_file = st.selectbox("DREAMT recording", files,
+                                                format_func=lambda path: str(path.relative_to(DREAMT_DIRECTORY)))
+            segment_start = st.number_input("Start minute", min_value=0, max_value=1440, value=0, step=1)
+            segment_minutes = st.number_input("Minutes to analyze", min_value=1, max_value=30, value=2, step=1)
+        else:
+            st.info("Put your authorized DREAMT CSV files under data/dreamt/.")
     fallback_hz = st.number_input(
         "Sampling rate when timestamps are absent (Hz)",
         min_value=8.0, max_value=1000.0, value=50.0, step=1.0,
         help="A timestamp column takes precedence when it can be parsed.",
     )
+    original_rate = ORIGINAL_ACCEL_HZ if source_choice == "DREAMT CSV" else None
+    if source_choice == "Upload CSV" and st.checkbox("File was resampled; specify original sensor rate"):
+        original_rate = st.number_input("Original accelerometer sampling rate (Hz)",
+                                        min_value=8.0, max_value=1000.0, value=32.0, step=1.0,
+                                        help="For DREAMT E4 acceleration, use 32 Hz even for the resampled 64/100 Hz files.")
     checkpoint_text = st.text_input(
         "Accelerometer-trained model checkpoint",
         value="models/sudo_sleep_accelerometer.pt",
@@ -166,6 +188,10 @@ st.markdown(
 
 if source_choice == "Siegen sleep study" and selected_study_record is None:
     st.info("The Siegen dataset archive is not available locally. See the sidebar for the download command.")
+    st.stop()
+
+if source_choice == "DREAMT CSV" and selected_dreamt_file is None:
+    st.info("DREAMT requires approved PhysioNet access. After downloading, place the CSV files in data/dreamt/.")
     st.stop()
 
 if source_choice == "Upload CSV" and uploaded is None:
@@ -195,6 +221,13 @@ try:
             "This segment can demonstrate signal processing but cannot validate apnea detection or AHI. "
             "Sensor values are uncalibrated counts."
         )
+    elif source_choice == "DREAMT CSV":
+        with st.spinner("Reading the selected DREAMT segment..."):
+            source_frame = cached_dreamt_segment(
+                str(selected_dreamt_file), float(segment_start) * 60,
+                float(segment_minutes) * 60, selected_dreamt_file.stat().st_mtime_ns,
+            )
+        st.info("DREAMT acceleration was sampled at 32 Hz before resampling. PSG sleep stages are not apnea-event labels.")
     elif source_choice == "Upload CSV":
         uploaded.seek(0)
         source_frame = pd.read_csv(uploaded)
@@ -202,7 +235,8 @@ try:
         source_frame = make_synthetic_demo()
         st.info("Showing a synthetic example only; these are generated signals, not recorded patient data.")
     with st.spinner("Extracting signal features and EMD motion proxy..."):
-        data = cached_preprocess(source_frame, float(fallback_hz))
+        data = cached_preprocess(source_frame, float(fallback_hz),
+                                 float(original_rate) if original_rate is not None else None)
 except Exception as exc:
     st.error(f"Could not process this recording: {exc}")
     st.stop()
@@ -251,7 +285,10 @@ st.caption(model_note)
 unavailable = [str(s["record"]) for s in data["record_summaries"]
                if not s["cardiac_available"]]
 if unavailable:
-    st.info("Cardiac-band proxy omitted below 40 Hz for: " + ", ".join(unavailable))
+    st.info("Cardiac-band proxy unavailable at the original sensor rate for: " + ", ".join(unavailable))
+limited_band = [s for s in data["record_summaries"] if s["cardiac_available"] and s["original_sensor_rate_hz"] < 62.5]
+if limited_band:
+    st.info("The SCG frequency band is capped below the original sensor Nyquist frequency; the full 10–30 Hz band is unavailable at these rates.")
 methods = sorted({str(s["cardiac_method"]) for s in data["record_summaries"]
                  if s["cardiac_available"]})
 if methods and methods != ["EMD IMF reconstruction"]:
@@ -281,13 +318,17 @@ st.caption(
 record_names = [str(s["record"]) for s in data["record_summaries"]]
 selected_record = st.selectbox("Recording to inspect", record_names)
 summary = next(s for s in data["record_summaries"] if str(s["record"]) == selected_record)
-if source_choice == "Siegen sleep study":
-    stages = source_frame[["time_s", "sleep_stage_code"]].copy()
+if source_choice == "Siegen sleep study" or (source_choice == "DREAMT CSV" and "psg_sleep_stage" in source_frame):
+    stage_column = "sleep_stage_code" if source_choice == "Siegen sleep study" else "psg_sleep_stage"
+    stages = source_frame[["time_s", stage_column]].copy()
     stages["period"] = (stages["time_s"] // 30).astype(int)
-    stage_summary = stages.groupby("period", sort=True)["sleep_stage_code"].agg(
-        lambda values: values.value_counts().index[0]
+    stage_summary = stages.groupby("period", sort=True)[stage_column].agg(
+        lambda values: values.dropna().value_counts().index[0] if values.notna().any() else "Unknown"
     ).reset_index()
-    stage_summary["stage"] = stage_summary["sleep_stage_code"].map(STAGE_NAMES).fillna("Unknown")
+    if source_choice == "Siegen sleep study":
+        stage_summary["stage"] = stage_summary[stage_column].map(STAGE_NAMES).fillna("Unknown")
+    else:
+        stage_summary["stage"] = stage_summary[stage_column].astype(str).replace({"R": "REM"})
     stage_fig = go.Figure(go.Scatter(
         x=stage_summary["period"] * 0.5, y=stage_summary["stage"],
         mode="lines+markers", line_shape="hv", name="PSG sleep stage",
