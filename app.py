@@ -39,7 +39,7 @@ def signal_figure(summary: dict, downsample_limit: int = 12000) -> go.Figure:
 
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.06,
                         subplot_titles=("Motion magnitude", "Respiratory-band proxy",
-                                        "Cardiac-band motion proxy"))
+                                        "EMD-derived SCG motion proxy"))
     fig.add_trace(go.Scattergl(x=seconds, y=raw[::stride], name="Motion",
                                line={"width": 0.8}), row=1, col=1)
     fig.add_trace(go.Scattergl(x=seconds, y=resp[::stride], name="Respiration",
@@ -178,6 +178,13 @@ states = apply_markov_smoothing(scores, records, transition)
 event_runs, total_hours, events_per_hour = candidate_event_rate(
     states, records, np.asarray(data["valid_seconds"])
 )
+default_sleep_hours = min(max(total_hours, 0.05), 24.0)
+estimated_sleep_hours = st.number_input(
+    "Estimated sleep hours covered by these recordings",
+    min_value=0.05, max_value=24.0, value=default_sleep_hours, step=0.25,
+    help="The default assumes all recorded time was sleep. Adjust it if you know the actual sleep duration.",
+)
+candidate_runs_per_sleep_hour = event_runs / max(float(estimated_sleep_hours), 1e-8)
 table = build_epoch_table(data, scores, contributions, states, float(raw_threshold))
 
 st.caption(model_note)
@@ -185,14 +192,23 @@ unavailable = [str(s["record"]) for s in data["record_summaries"]
                if not s["cardiac_available"]]
 if unavailable:
     st.info("Cardiac-band proxy omitted below 40 Hz for: " + ", ".join(unavailable))
+methods = sorted({str(s["cardiac_method"]) for s in data["record_summaries"]
+                 if s["cardiac_available"]})
+if methods and methods != ["EMD IMF reconstruction"]:
+    st.info("SCG proxy method in use: " + ", ".join(methods) + ".")
 
 raw_candidates = int(np.sum(scores >= raw_threshold))
 candidate_windows = int(np.sum(states == 1))
 left, middle, right = st.columns(3)
 left.metric("Raw candidate windows", raw_candidates)
 middle.metric("Smoothed candidate runs", event_runs)
-right.metric("Candidate runs per recorded hour", f"{events_per_hour:.1f}")
+right.metric("Candidate runs per estimated sleep hour", f"{candidate_runs_per_sleep_hour:.1f}")
 st.caption(f"Analyzed {total_hours:.2f} recorded hours using **{backend}**.")
+st.caption(
+    "This is an experimental AHI-like rate: smoothed candidate runs divided by "
+    "the sleep duration you entered. It is not clinical AHI because the event "
+    "detector and sleep-time estimate are not validated."
+)
 
 record_names = [str(s["record"]) for s in data["record_summaries"]]
 selected_record = st.selectbox("Recording to inspect", record_names)

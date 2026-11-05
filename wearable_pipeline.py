@@ -19,6 +19,11 @@ import pywt
 from scipy.integrate import trapezoid
 from scipy.signal import butter, find_peaks, resample_poly, sosfiltfilt, welch
 
+try:
+    from PyEMD import EMD
+except ImportError:  # The dashboard keeps a marked bandpass fallback.
+    EMD = None
+
 MODEL_FS = 100
 EPOCH_SECONDS = 60
 EPOCH_SAMPLES = MODEL_FS * EPOCH_SECONDS
@@ -130,6 +135,42 @@ def _resample_to_model_rate(signal: np.ndarray, source_hz: float) -> np.ndarray:
     ratio = Fraction(MODEL_FS / source_hz).limit_denominator(10000)
     result = resample_poly(signal, ratio.numerator, ratio.denominator)
     return np.asarray(result, dtype=np.float32)
+
+
+def _emd_scg_proxy(signal: np.ndarray, source_hz: float) -> tuple[np.ndarray, bool]:
+    """Reconstruct a cardiac-band motion proxy from EMD IMFs in the SCG band.
+
+    The input remains accelerometry. This does not reconstruct ECG morphology.
+    At lower source rates, the usable upper edge is limited by the sensor's
+    original Nyquist frequency even though the signal was resampled to 100 Hz.
+    """
+    signal = np.asarray(signal, dtype=np.float64)
+    upper_hz = min(30.0, source_hz * 0.48, MODEL_FS * 0.48)
+    if upper_hz <= 10.0 or len(signal) < MODEL_FS * 8:
+        return np.zeros(len(signal), dtype=np.float32), EMD is not None
+    if EMD is None:
+        return _bandpass(signal, 10.0, upper_hz, MODEL_FS), False
+
+    try:
+        imfs = EMD().emd(signal, max_imf=10)
+        if imfs.ndim != 2 or not len(imfs):
+            return np.zeros(len(signal), dtype=np.float32), True
+        selected = []
+        for imf in imfs:
+            freq, power = welch(imf, fs=MODEL_FS, nperseg=min(2048, len(imf)))
+            band = (freq >= 10.0) & (freq <= upper_hz)
+            if not band.any():
+                continue
+            peak = float(freq[band][np.argmax(power[band])])
+            band_power = float(trapezoid(power[band], freq[band]))
+            total_power = float(trapezoid(power, freq))
+            if 10.0 <= peak <= upper_hz and band_power >= 0.20 * max(total_power, 1e-12):
+                selected.append(imf)
+        if not selected:
+            return np.zeros(len(signal), dtype=np.float32), True
+        return np.sum(selected, axis=0).astype(np.float32), True
+    except (ValueError, FloatingPointError):
+        return np.zeros(len(signal), dtype=np.float32), True
 
 
 def _safe_std(values: np.ndarray) -> float:
@@ -251,15 +292,20 @@ def _process_record(
     resp_axis = int(np.argmax(np.std(resp_axes, axis=1)))
     resp = resp_axes[resp_axis]
     cardiac_available = resolved_hz >= 40.0
+    cardiac = np.zeros_like(raw)
+    emd_used = False
     if cardiac_available:
-        cardiac_high = min(20.0, resolved_hz * 0.45)
-        cardiac_axes = np.stack(
-            [_bandpass(axis, 5.0, cardiac_high, MODEL_FS) for axis in resampled_axes],
-            axis=0,
-        )
-        cardiac = cardiac_axes[int(np.argmax(np.std(cardiac_axes, axis=1)))]
-    else:
-        cardiac = np.zeros_like(raw)
+        # Decompose minute-sized chunks so an overnight recording does not
+        # require a single prohibitively large EMD operation.
+        for start in range(0, len(raw), EPOCH_SAMPLES):
+            stop = min(start + EPOCH_SAMPLES, len(raw))
+            axis_proxies = []
+            for axis in resampled_axes:
+                proxy, used_emd = _emd_scg_proxy(axis[start:stop], resolved_hz)
+                axis_proxies.append(proxy)
+                emd_used = emd_used or used_emd
+            best_axis = int(np.argmax([_safe_std(proxy) for proxy in axis_proxies]))
+            cardiac[start:stop] = axis_proxies[best_axis]
 
     pause_reference = float(np.percentile(np.abs(resp), 70)) if len(resp) else 0.0
 
@@ -330,6 +376,7 @@ def _process_record(
         "valid_seconds": valid_seconds,
         "pause_fraction": pause_fraction,
         "cardiac_available": cardiac_available,
+        "cardiac_method": "EMD IMF reconstruction" if emd_used else "bandpass fallback",
         "sample_rate_hz": resolved_hz,
         "samples_model_fs": raw,
         "resp_signal": resp,
@@ -372,6 +419,7 @@ def preprocess_accelerometer(
             "record": str(r["records"][0]),
             "sample_rate_hz": float(r["sample_rate_hz"]),
             "cardiac_available": bool(r["cardiac_available"]),
+            "cardiac_method": r["cardiac_method"],
             "samples_model_fs": r["samples_model_fs"],
             "resp_signal": r["resp_signal"],
             "cardiac_proxy": r["cardiac_proxy"],

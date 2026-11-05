@@ -14,8 +14,11 @@ month-by-month milestones.
 ## What runs in the app
 
 The app accepts a CSV with three accelerometer axes. It derives a respiratory
-band signal and, when the source sampling rate is high enough, a cardiac-band
-mechanical proxy. It divides the recording into one-minute windows, displays
+band signal and, when the source sampling rate is high enough, an EMD-derived
+10–30 Hz seismocardiography (SCG) motion proxy. At lower source rates, the
+usable band is capped below the original Nyquist frequency. If EMD is missing,
+the dashboard labels its bandpass fallback. Neither signal is reconstructed
+ECG. It divides the recording into one-minute windows, displays
 the signals and a respiratory spectrogram, scores candidate low-respiration
 windows, smooths the sequence with a two-state Viterbi/Markov model, and shows
 SHAP values for the baseline score.
@@ -27,10 +30,25 @@ was trained for accelerometer input using `train_wearable.py`. No such trained
 checkpoint is included. Without one, the app clearly labels results as
 experimental candidate scores.
 
-The dashboard's hourly candidate rate is an exploratory index. It is not a
-clinical AHI, diagnosis, or validated apnea event count. Accelerometer proxy
+The dashboard can divide smoothed candidate runs by the sleep duration entered
+by the user to show an experimental AHI-like rate. It is not a clinical AHI,
+diagnosis, or validated apnea event count. Accelerometer proxy
 signals are not ECG reconstructions. SHAP explains the transparent heuristic
 score only; it does not explain the optional neural model's predictions.
+
+## Proposal pipeline status
+
+The wearable path now includes per-record z-score normalization, EMD-based
+10–30 Hz SCG proxy extraction (limited by the original sensor Nyquist rate), a
+respiratory proxy, the CNN with squeeze-excitation channel attention and
+within-minute plus five-minute Transformer context, Viterbi sequence smoothing,
+and a user-entered sleep-time denominator for an experimental candidate rate.
+SHAP currently explains the heuristic score; it is not used to filter neural
+predictions. The proposal's Cheyne–Stokes constraint, sleep-stage/position/REM
+classification, and paired accelerometer/PSG validation are not implemented.
+The proposal's 16-month schedule and AUC target are plans, not results. The
+archived five-model checkpoint was trained in the ECG notebook and is not
+compatible with accelerometer input.
 
 ## Run locally
 
