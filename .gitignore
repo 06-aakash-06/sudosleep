@@ -15,3 +15,8 @@ data/
 *.pkl
 features_cache*/
 outputs/
+
+# React workspace dependencies and local build
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo

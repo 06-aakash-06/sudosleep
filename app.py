@@ -115,8 +115,15 @@ def build_epoch_table(data: dict, scores: np.ndarray, contributions: np.ndarray,
     return pd.DataFrame(rows)
 
 
+st.markdown("""<style>
+.stApp {background: #f5f7fb; color: #17223b;} [data-testid="stSidebar"] {background: #eaf0f6;}
+.block-container {padding-top: 2rem; max-width: 1440px;}
+[data-testid="stMetric"] {background: white; border: 1px solid #e1e8f0; border-radius: 14px; padding: 18px;}
+.stTabs [data-baseweb="tab-list"] {gap: 12px; border-bottom: 1px solid #d9e3ee;}
+.stTabs [data-baseweb="tab"] {padding: 12px 20px; font-weight: 600;}
+</style>""", unsafe_allow_html=True)
 st.title("SudoSleep")
-st.caption("Accelerometer respiratory-pattern prototype")
+st.caption("WEARABLE SLEEP RESEARCH  /  SIGNALS · EVENTS · MODEL PERFORMANCE")
 st.warning(
     "Experimental research demo. Motion-derived proxies are not ECG, and the "
     "candidate-event rate is not a clinical AHI or diagnosis."
@@ -344,158 +351,179 @@ st.caption(
     "A candidate rate divided by sleep time is not validated AHI."
 )
 
-with st.expander("Model training and held-out evaluation"):
+overview_tab, signals_tab, explain_tab, evaluation_tab = st.tabs(["Overview & events", "Signals & sleep", "Explainability", "Model evaluation"])
+with evaluation_tab:
+    st.header("Held-out model evaluation")
     report_path = DREAMT_DIRECTORY / "DREAMT/derived/dreamt_results.json"
     if report_path.is_file():
         try:
             report = json.loads(report_path.read_text())
             st.warning(report.get("label_caveat", "Check label provenance before interpreting results."))
             st.caption(report.get("note", ""))
-            st.write("CNN/Transformer held-out test:", report.get("test", {}))
-            st.write("Random-forest baseline held-out test:", report.get("baseline_test", {}))
-            st.write("Coarse candidate-run rate MAE versus PSG AHI:", report.get("test_candidate_rate_mae_vs_ahi"))
+            test = report.get("test", {})
+            baseline = report.get("baseline_test", {})
+            event = report.get("event_matching", {})
+            st.subheader("Window classification · held-out subjects")
+            cols = st.columns(4)
+            for col, label, key in zip(cols, ["AUROC", "AUPRC", "Precision", "Recall"], ["auroc", "auprc", "precision", "recall"]):
+                value = test.get(key)
+                col.metric(label, f"{value:.3f}" if value is not None else "—")
+            comparison = pd.DataFrame({"CNN + Transformer": test, "Random forest": baseline}).loc[["auroc", "auprc", "precision", "recall", "specificity", "f1"]]
+            st.dataframe(comparison, width="stretch")
+            st.caption(f"Test windows: {test.get('n_windows', '—')} · positive windows: {test.get('positive_windows', '—')} · threshold selected on validation subjects.")
+            st.subheader("Event-level comparison")
+            cols = st.columns(3)
+            cols[0].metric("Event precision", f"{event.get('precision', 0):.1%}")
+            cols[1].metric("Event recall", f"{event.get('recall', 0):.1%}")
+            rate_mae = report.get("test_candidate_rate_mae_vs_ahi")
+            cols[2].metric("Candidate rate MAE vs PSG AHI", f"{rate_mae:.1f}/hr" if rate_mae is not None else "—")
+            st.caption(event.get("definition", ""))
+            st.caption("Minute-resolution candidate runs and this rate comparison are not validated clinical AHI.")
             history = pd.DataFrame(report.get("training_history", []))
             if not history.empty:
+                st.subheader("Training history")
                 st.line_chart(history.set_index("epoch")[["validation_auprc"]])
+                st.dataframe(history, width="stretch", hide_index=True)
         except Exception as exc:
             st.error(f"Could not read the local evaluation report: {exc}")
     else:
         st.info("No completed DREAMT training report is available yet.")
         status_path = DREAMT_DIRECTORY / "DREAMT/derived/overnight_status.json"
         if status_path.is_file():
-            try:
-                status = json.loads(status_path.read_text())
-                count = len(list((status_path.parent / "features").glob("*.npz")))
-                st.caption(f"Local run: {status.get('stage', 'unknown')} · {count} subject caches prepared · "
-                           f"last update {status.get('updated_utc', 'unknown')}")
-                if status.get("error"):
-                    st.error(status["error"])
-            except (OSError, ValueError):
-                st.caption("Local run status is temporarily unavailable.")
+            status = json.loads(status_path.read_text())
+            st.write("Local run status:", status.get("stage", "unknown"))
+            st.caption(f"{len(list((status_path.parent / 'features').glob('*.npz')))} subject caches prepared · {status.get('updated_utc', 'unknown')}")
 
 record_names = [str(s["record"]) for s in data["record_summaries"]]
 selected_record = st.selectbox("Recording to inspect", record_names)
 summary = next(s for s in data["record_summaries"] if str(s["record"]) == selected_record)
-if source_choice == "Siegen sleep study" or (source_choice == "DREAMT CSV" and "psg_sleep_stage" in source_frame):
-    stage_column = "sleep_stage_code" if source_choice == "Siegen sleep study" else "psg_sleep_stage"
-    stages = source_frame[["time_s", stage_column]].copy()
-    stages["period"] = (stages["time_s"] // 30).astype(int)
-    stage_summary = stages.groupby("period", sort=True)[stage_column].agg(
-        lambda values: values.dropna().value_counts().index[0] if values.notna().any() else "Unknown"
-    ).reset_index()
-    if source_choice == "Siegen sleep study":
-        stage_summary["stage"] = stage_summary[stage_column].map(STAGE_NAMES).fillna("Unknown")
-    else:
-        stage_summary["stage"] = stage_summary[stage_column].astype(str).replace({"R": "REM"})
-    stage_fig = go.Figure(go.Scatter(
-        x=stage_summary["period"] * 0.5, y=stage_summary["stage"],
-        mode="lines+markers", line_shape="hv", name="PSG sleep stage",
-    ))
-    stage_fig.update_layout(title="PSG sleep stages (30-second summaries)",
-                            xaxis_title="Minutes into selected segment", yaxis_title="Sleep stage",
-                            height=280, margin={"l": 10, "r": 10, "t": 55, "b": 10})
-    st.plotly_chart(stage_fig, width="stretch")
-st.plotly_chart(signal_figure(summary), width="stretch")
-st.plotly_chart(spectrogram_figure(summary["resp_signal"]), width="stretch")
+with signals_tab:
+    if source_choice == "Siegen sleep study" or (source_choice == "DREAMT CSV" and "psg_sleep_stage" in source_frame):
+        stage_column = "sleep_stage_code" if source_choice == "Siegen sleep study" else "psg_sleep_stage"
+        stages = source_frame[["time_s", stage_column]].copy()
+        stages["period"] = (stages["time_s"] // 30).astype(int)
+        stage_summary = stages.groupby("period", sort=True)[stage_column].agg(
+            lambda values: values.dropna().value_counts().index[0] if values.notna().any() else "Unknown"
+        ).reset_index()
+        if source_choice == "Siegen sleep study":
+            stage_summary["stage"] = stage_summary[stage_column].map(STAGE_NAMES).fillna("Unknown")
+        else:
+            stage_summary["stage"] = stage_summary[stage_column].astype(str).replace({"R": "REM"})
+        stage_fig = go.Figure(go.Scatter(
+            x=stage_summary["period"] * 0.5, y=stage_summary["stage"],
+            mode="lines+markers", line_shape="hv", name="PSG sleep stage",
+        ))
+        stage_fig.update_layout(title="PSG sleep stages (30-second summaries)",
+                                xaxis_title="Minutes into selected segment", yaxis_title="Sleep stage",
+                                height=280, margin={"l": 10, "r": 10, "t": 55, "b": 10})
+        st.plotly_chart(stage_fig, width="stretch")
+    st.plotly_chart(signal_figure(summary), width="stretch")
+    st.plotly_chart(spectrogram_figure(summary["resp_signal"]), width="stretch")
 
-if source_choice == "DREAMT CSV":
-    event_columns = {"psg_obstructive_apnea": "Obstructive apnea", "psg_central_apnea": "Central apnea",
-                     "psg_hypopnea": "Hypopnea", "psg_multiple_events": "Multiple events",
-                     "psg_mixed_apnea": "Mixed apnea"}
-    event_chart = go.Figure()
-    for column, label in event_columns.items():
-        if column in source_frame:
-            marked = pd.to_numeric(source_frame[column], errors="coerce").eq(1)
-            seconds = np.unique(np.floor(source_frame.loc[marked, "time_s"]).astype(int))
-            event_chart.add_trace(go.Scatter(x=seconds / 60.0, y=[label] * len(seconds),
-                                             mode="markers", marker={"size": 5}, name=label))
-    event_chart.update_layout(title="PSG-marked respiratory events", xaxis_title="Minutes into segment",
-                              height=280, showlegend=False, margin={"l": 10, "r": 10, "t": 55, "b": 10})
-    st.plotly_chart(event_chart, width="stretch")
-    st.caption("Only timestamps marked 1 are shown. Blank event fields are treated as provisional unmarked intervals in the research audit.")
+    if source_choice == "DREAMT CSV":
+        event_columns = {"psg_obstructive_apnea": "Obstructive apnea", "psg_central_apnea": "Central apnea",
+                         "psg_hypopnea": "Hypopnea", "psg_multiple_events": "Multiple events",
+                         "psg_mixed_apnea": "Mixed apnea"}
+        event_chart = go.Figure()
+        for column, label in event_columns.items():
+            if column in source_frame:
+                marked = pd.to_numeric(source_frame[column], errors="coerce").eq(1)
+                seconds = np.unique(np.floor(source_frame.loc[marked, "time_s"]).astype(int))
+                event_chart.add_trace(go.Scatter(x=seconds / 60.0, y=[label] * len(seconds),
+                                                 mode="markers", marker={"size": 5}, name=label))
+        event_chart.update_layout(title="PSG-marked respiratory events", xaxis_title="Minutes into segment",
+                                  height=280, showlegend=False, margin={"l": 10, "r": 10, "t": 55, "b": 10})
+        st.plotly_chart(event_chart, width="stretch")
+        st.caption("Only timestamps marked 1 are shown. Blank event fields are treated as provisional unmarked intervals in the research audit.")
+
 
 record_table = table[table["record"] == selected_record].reset_index(drop=True)
 record_indices = np.flatnonzero(records == selected_record)
-sequence = go.Figure()
-sequence.add_trace(go.Scatter(
-    x=record_table["minute"], y=record_table["candidate_score"],
-    mode="lines+markers", name="Candidate score", line={"color": "#159895"},
-))
-sequence.add_trace(go.Scatter(
-    x=record_table.loc[states[record_indices] == 1, "minute"],
-    y=record_table.loc[states[record_indices] == 1, "candidate_score"],
-    mode="markers", name="Markov state: candidate",
-    marker={"color": "#ef476f", "size": 9, "symbol": "diamond"},
-))
-sequence.add_hline(y=float(raw_threshold), line_dash="dash", line_color="gray")
-sequence.update_layout(title="Per-minute candidate sequence", xaxis_title="Minute",
-                       yaxis_title="Score (uncalibrated 0–1)", height=350,
-                       margin={"l": 10, "r": 10, "t": 55, "b": 10})
-st.plotly_chart(sequence, width="stretch")
-
-st.subheader("SHAP explanation of the baseline")
-st.caption(
-    "SHAP attributes the transparent heuristic score to respiratory amplitude, "
-    "variability, and pause fraction. It does not explain the CNN/Transformer "
-    "prediction when a trained model is selected."
-)
-selected_minute = st.selectbox(
-    "Minute to explain", record_table["minute"].tolist(),
-    index=int(np.argmax(scores[record_indices])),
-)
-selected_position = int(record_table.index[record_table["minute"] == selected_minute][0])
-selected_row_index = int(record_indices[selected_position])
-try:
-    shap_names, shap_values, shap_base, shap_score = heuristic_shap_attributions(
-        data, selected_row_index
-    )
-    shap_chart = go.Figure(go.Bar(
-        x=shap_values,
-        y=shap_names,
-        orientation="h",
-        marker_color=["#ef476f" if value >= 0 else "#159895" for value in shap_values],
+with overview_tab:
+    st.subheader("Candidate sequence")
+    sequence = go.Figure()
+    sequence.add_trace(go.Scatter(
+        x=record_table["minute"], y=record_table["candidate_score"],
+        mode="lines+markers", name="Candidate score", line={"color": "#159895"},
     ))
-    shap_chart.add_vline(x=0, line_color="gray", line_width=1)
-    shap_chart.update_layout(
-        xaxis_title="SHAP value (effect on baseline score)", height=280,
-        margin={"l": 10, "r": 10, "t": 20, "b": 10},
-    )
-    st.plotly_chart(shap_chart, width="stretch")
+    sequence.add_trace(go.Scatter(
+        x=record_table.loc[states[record_indices] == 1, "minute"],
+        y=record_table.loc[states[record_indices] == 1, "candidate_score"],
+        mode="markers", name="Markov state: candidate",
+        marker={"color": "#ef476f", "size": 9, "symbol": "diamond"},
+    ))
+    sequence.add_hline(y=float(raw_threshold), line_dash="dash", line_color="gray")
+    sequence.update_layout(title="Per-minute candidate sequence", xaxis_title="Minute",
+                           yaxis_title="Score (uncalibrated 0–1)", height=350,
+                           margin={"l": 10, "r": 10, "t": 55, "b": 10})
+    st.plotly_chart(sequence, width="stretch")
+
+
+with explain_tab:
+    st.subheader("SHAP explanation of the baseline")
     st.caption(
-        f"Baseline score: {shap_score:.3f} = expected score {shap_base:.3f} "
-        f"+ SHAP contributions."
+        "SHAP attributes the transparent heuristic score to respiratory amplitude, "
+        "variability, and pause fraction. It does not explain the CNN/Transformer "
+        "prediction when a trained model is selected."
     )
-except Exception as exc:
-    st.info(f"SHAP is unavailable ({exc}); showing baseline drivers instead.")
-    driver_names = ["Low respiratory amplitude", "Low respiratory variability", "Pause fraction"]
-    driver_values = contributions[selected_row_index]
-    drivers = go.Figure(go.Bar(
-        x=driver_values, y=driver_names, orientation="h",
-        marker_color=["#ef476f", "#f4a261", "#457b9d"],
-    ))
-    drivers.update_layout(xaxis_title="Contribution to heuristic score", height=260,
-                          margin={"l": 10, "r": 10, "t": 20, "b": 10})
-    st.plotly_chart(drivers, width="stretch")
+    selected_minute = st.selectbox(
+        "Minute to explain", record_table["minute"].tolist(),
+        index=int(np.argmax(scores[record_indices])),
+    )
+    selected_position = int(record_table.index[record_table["minute"] == selected_minute][0])
+    selected_row_index = int(record_indices[selected_position])
+    try:
+        shap_names, shap_values, shap_base, shap_score = heuristic_shap_attributions(
+            data, selected_row_index
+        )
+        shap_chart = go.Figure(go.Bar(
+            x=shap_values,
+            y=shap_names,
+            orientation="h",
+            marker_color=["#ef476f" if value >= 0 else "#159895" for value in shap_values],
+        ))
+        shap_chart.add_vline(x=0, line_color="gray", line_width=1)
+        shap_chart.update_layout(
+            xaxis_title="SHAP value (effect on baseline score)", height=280,
+            margin={"l": 10, "r": 10, "t": 20, "b": 10},
+        )
+        st.plotly_chart(shap_chart, width="stretch")
+        st.caption(
+            f"Baseline score: {shap_score:.3f} = expected score {shap_base:.3f} "
+            f"+ SHAP contributions."
+        )
+    except Exception as exc:
+        st.info(f"SHAP is unavailable ({exc}); showing baseline drivers instead.")
+        driver_names = ["Low respiratory amplitude", "Low respiratory variability", "Pause fraction"]
+        driver_values = contributions[selected_row_index]
+        drivers = go.Figure(go.Bar(
+            x=driver_values, y=driver_names, orientation="h",
+            marker_color=["#ef476f", "#f4a261", "#457b9d"],
+        ))
+        drivers.update_layout(xaxis_title="Contribution to heuristic score", height=260,
+                              margin={"l": 10, "r": 10, "t": 20, "b": 10})
+        st.plotly_chart(drivers, width="stretch")
 
-if backend == "Accelerometer CNN + Transformer ensemble":
-    st.subheader("CNN/Transformer scalar explanation")
-    st.caption("Approximate Kernel SHAP changes the selected minute's scalar features relative to the training median while holding the signal and other context fixed. It does not explain waveform contributions.")
-    if st.button("Explain selected model prediction"):
-        try:
-            with st.spinner("Calculating model scalar attributions..."):
-                names, values, expected, predicted = explain_accelerometer_model_scalars(
-                    explanation_data, checkpoint_path, int(explanation_indices[selected_row_index])
-                )
-            order = np.argsort(np.abs(values))
-            model_shap = go.Figure(go.Bar(
-                x=values[order], y=np.asarray(names)[order], orientation="h",
-                marker_color=["#ef476f" if value >= 0 else "#159895" for value in values[order]],
-            ))
-            model_shap.update_layout(xaxis_title="Conditional SHAP effect on model probability", height=420)
-            st.plotly_chart(model_shap, width="stretch")
-            st.caption(f"Model probability {predicted:.3f}; background probability {expected:.3f}.")
-        except Exception as exc:
-            st.error(f"Could not explain the model prediction: {exc}")
+    if backend == "Accelerometer CNN + Transformer ensemble":
+        st.subheader("CNN/Transformer scalar explanation")
+        st.caption("Approximate Kernel SHAP changes the selected minute's scalar features relative to the training median while holding the signal and other context fixed. It does not explain waveform contributions.")
+        if st.button("Explain selected model prediction"):
+            try:
+                with st.spinner("Calculating model scalar attributions..."):
+                    names, values, expected, predicted = explain_accelerometer_model_scalars(
+                        explanation_data, checkpoint_path, int(explanation_indices[selected_row_index])
+                    )
+                order = np.argsort(np.abs(values))
+                model_shap = go.Figure(go.Bar(
+                    x=values[order], y=np.asarray(names)[order], orientation="h",
+                    marker_color=["#ef476f" if value >= 0 else "#159895" for value in values[order]],
+                ))
+                model_shap.update_layout(xaxis_title="Conditional SHAP effect on model probability", height=420)
+                st.plotly_chart(model_shap, width="stretch")
+                st.caption(f"Model probability {predicted:.3f}; background probability {expected:.3f}.")
+            except Exception as exc:
+                st.error(f"Could not explain the model prediction: {exc}")
+
 
 with st.expander("Minute-level output"):
     st.dataframe(record_table, width="stretch", hide_index=True)

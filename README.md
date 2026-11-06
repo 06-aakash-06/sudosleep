@@ -2,7 +2,7 @@
 
 SudoSleep is a hackathon prototype for exploring respiratory patterns in
 consumer-wearable accelerometer recordings. It includes an uploadable
-Streamlit dashboard, motion-derived respiratory and cardiac-band proxies, a
+React research workspace and legacy Streamlit dashboard, motion-derived respiratory and cardiac-band proxies, a
 transparent candidate-event baseline, sequence smoothing, and an optional
 CNN/Transformer model path for a model trained on labeled accelerometer data.
 
@@ -10,6 +10,32 @@ The project work period was January–June 2026, as supplied by the project
 author. The files currently present include March 2026 ECG benchmark notebooks
 and a consolidated pipeline; this repository does not invent separate
 month-by-month milestones.
+
+## Research workspace (React + Python)
+
+The primary interface is a local React/TypeScript workspace backed by the
+existing Python signal and model pipeline. It has a horizontal research index,
+a whole-night target strip, linked signal cursors and zoom, PSG stage/event
+tracks, selected-segment predictions and exports, conditional neural scalar
+SHAP, and a separate held-out model study. Evaluation reads saved artifacts;
+it does not retrain the model when a page opens.
+
+```bash
+# Install Python requirements into your existing environment first.
+python -m pip install -r requirements.txt
+npm ci --prefix web
+npm run build --prefix web
+./run_workspace.sh
+```
+
+Open http://127.0.0.1:8000. For frontend development, keep the API on port 8000
+and run `npm run dev --prefix web`; Vite forwards `/api` to the local API.
+The authorized DREAMT files, prepared caches, checkpoint, splits and evaluation
+artifacts must already exist under `data/dreamt/DREAMT/derived/` for the DREAMT
+workflow. Missing artifacts produce explicit errors. The UI also accepts short
+CSV uploads and a synthetic signal example through the heuristic path. The
+Streamlit app remains available for the Siegen workflow and legacy controls.
+The API binds to loopback and serves the built UI; no dataset is published.
 
 ## What runs in the app
 
