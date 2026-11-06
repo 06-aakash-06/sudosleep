@@ -66,7 +66,9 @@ def overview():
     def points(x, y):
         idx = np.unique(np.linspace(0, len(x)-1, min(250,len(x))).astype(int))
         return [{'x':float(x[i]), 'y':float(y[i])} for i in idx]
-    return {'report': report, 'split': split, 'status': read_json(DERIVED / 'overnight_status.json'),
+    return {'report': report, 'split': split, 'status': (read_json(DERIVED / 'overnight_status.json')
+                       if (DERIVED / 'overnight_status.json').is_file()
+                       else {'stage': 'complete', 'updated_utc': None}),
             'audit': {'subjects':len(audit), 'samples':int(audit['rows'].sum()),
                       'hours':float(audit['elapsed_h'].sum()), 'gaps':int(audit['gaps'].sum()),
                       'invalid':int(audit['invalid_acc_rows'].sum())},

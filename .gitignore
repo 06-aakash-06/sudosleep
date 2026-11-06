@@ -20,3 +20,11 @@ outputs/
 web/node_modules/
 web/dist/
 web/*.tsbuildinfo
+
+# Local credentials and generated research artifacts
+.env
+.env.*
+*.joblib
+*.npz
+*.log
+*.tmp
