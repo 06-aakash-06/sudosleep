@@ -684,20 +684,20 @@ export default function App() {
                   data={segment.windows}
                   margin={{ top: 25, right: 30, bottom: 10, left: -15 }}
                 >
-                  <CartesianGrid vertical={false} stroke="#e6e5dd" />
+                  <CartesianGrid vertical={false} stroke="#28372e" />
                   <XAxis dataKey="minute" tickFormatter={(v) => `${v}m`} />
                   <YAxis domain={[0, 1]} />
                   <Tooltip />
                   <ReferenceLine
                     y={overview?.report.test.threshold}
-                    stroke="#bc795c"
+                    stroke="#d49b7c"
                     strokeDasharray="5 4"
                     label="Validation threshold"
                   />
                   <Line
                     dataKey="score"
                     name="Model score"
-                    stroke="#247c72"
+                    stroke="#64b7a2"
                     strokeWidth={2}
                     dot={{ r: 4 }}
                   />
@@ -838,7 +838,7 @@ export default function App() {
                   data={overview.curves.pr}
                   xLabel="Recall"
                   yLabel="Precision"
-                  color="#bc795c"
+                  color="#d49b7c"
                 />
               </div>
             </section>
@@ -920,7 +920,7 @@ export default function App() {
                     <ScatterChart
                       margin={{ top: 15, right: 30, bottom: 20, left: 10 }}
                     >
-                      <CartesianGrid stroke="#e6e5dd" />
+                      <CartesianGrid stroke="#28372e" />
                       <XAxis
                         type="number"
                         dataKey="reference_ahi"
@@ -932,7 +932,7 @@ export default function App() {
                         name="Candidate runs/hr"
                       />
                       <Tooltip cursor={{ strokeDasharray: "3 3" }} />
-                      <Scatter data={report.per_subject} fill="#247c72" />
+                      <Scatter data={report.per_subject} fill="#64b7a2" />
                     </ScatterChart>
                   </ResponsiveContainer>
                   <p className="axis-label">
@@ -974,13 +974,13 @@ export default function App() {
                   <h3>Validation AUPRC</h3>
                   <ResponsiveContainer width="100%" height={240}>
                     <LineChart data={report.training_history}>
-                      <CartesianGrid stroke="#e6e5dd" />
+                      <CartesianGrid stroke="#28372e" />
                       <XAxis dataKey="epoch" />
                       <YAxis domain={[0, 1]} />
                       <Tooltip />
                       <Line
                         dataKey="validation_auprc"
-                        stroke="#247c72"
+                        stroke="#64b7a2"
                         strokeWidth={2}
                       />
                     </LineChart>
@@ -990,13 +990,13 @@ export default function App() {
                   <h3>Mean training loss</h3>
                   <ResponsiveContainer width="100%" height={240}>
                     <LineChart data={report.training_history}>
-                      <CartesianGrid stroke="#e6e5dd" />
+                      <CartesianGrid stroke="#28372e" />
                       <XAxis dataKey="epoch" />
                       <YAxis domain={["auto", "auto"]} />
                       <Tooltip />
                       <Line
                         dataKey="mean_loss"
-                        stroke="#bc795c"
+                        stroke="#d49b7c"
                         strokeWidth={2}
                       />
                     </LineChart>
@@ -1091,7 +1091,7 @@ export default function App() {
                             <i
                               style={{
                                 width: `${Math.max(1, (Math.abs(f.value) / Math.max(...explanation.features.map((x) => Math.abs(x.value)))) * 100)}%`,
-                                background: f.value > 0 ? "#bd795b" : "#247c72",
+                                background: f.value > 0 ? "#d49b7c" : "#64b7a2",
                               }}
                             />
                           </div>

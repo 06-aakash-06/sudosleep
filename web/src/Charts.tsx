@@ -12,7 +12,7 @@ import {
   AreaChart,
 } from "recharts";
 import type { Signal, Spectral } from "./types";
-export const COLORS = ["#247c72", "#75919b", "#c27751"];
+export const COLORS = ["#64b7a2", "#8faab2", "#d59a70"];
 export function SignalChart({
   signal,
   index = 0,
@@ -52,7 +52,7 @@ export function SignalChart({
             }}
             margin={{ top: 8, right: 12, bottom: 0, left: -25 }}
           >
-            <CartesianGrid vertical={false} stroke="#e9e8e2" />
+            <CartesianGrid vertical={false} stroke="#28372e" />
             <XAxis
               dataKey="minute"
               type="number"
@@ -73,7 +73,7 @@ export function SignalChart({
             <Tooltip
               labelFormatter={(v) => `Minute ${Number(v).toFixed(2)}`}
               formatter={(v) => Number(v).toFixed(4)}
-              contentStyle={{ borderRadius: 8, border: "1px solid #dadbd3" }}
+              contentStyle={{ borderRadius: 8, border: "1px solid #3b5041" }}
             />
             <Line
               type="linear"
@@ -98,7 +98,7 @@ export function Curve({
   title,
   xLabel,
   yLabel,
-  color = "#247c72",
+  color = "#64b7a2",
   reference = false,
 }: {
   data: { x: number; y: number }[];
@@ -117,7 +117,7 @@ export function Curve({
           data={data}
           margin={{ top: 14, right: 18, bottom: 5, left: -15 }}
         >
-          <CartesianGrid stroke="#e6e5dd" strokeDasharray="3 4" />
+          <CartesianGrid stroke="#28372e" strokeDasharray="3 4" />
           <XAxis
             dataKey="x"
             type="number"
@@ -136,7 +136,7 @@ export function Curve({
                 { x: 0, y: 0 },
                 { x: 1, y: 1 },
               ]}
-              stroke="#aeb5ae"
+              stroke="#718a77"
               strokeDasharray="5 5"
             />
           ) : null}

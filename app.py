@@ -116,10 +116,10 @@ def build_epoch_table(data: dict, scores: np.ndarray, contributions: np.ndarray,
 
 
 st.markdown("""<style>
-.stApp {background: #f5f7fb; color: #17223b;} [data-testid="stSidebar"] {background: #eaf0f6;}
+.stApp {background: #0c1211; color: #deebe2;} [data-testid="stSidebar"] {background: #131d19;}
 .block-container {padding-top: 2rem; max-width: 1440px;}
-[data-testid="stMetric"] {background: white; border: 1px solid #e1e8f0; border-radius: 14px; padding: 18px;}
-.stTabs [data-baseweb="tab-list"] {gap: 12px; border-bottom: 1px solid #d9e3ee;}
+[data-testid="stMetric"] {background: #17221c; border: 1px solid #2b3931; border-radius: 14px; padding: 18px;}
+.stTabs [data-baseweb="tab-list"] {gap: 12px; border-bottom: 1px solid #2b3931;}
 .stTabs [data-baseweb="tab"] {padding: 12px 20px; font-weight: 600;}
 </style>""", unsafe_allow_html=True)
 st.title("SudoSleep")
